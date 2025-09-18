@@ -14,77 +14,76 @@ import java.io.OutputStream
 
 class HttpService {
     lateinit var engine: NettyApplicationEngine
-    var channel = Channel<ByteArray>(10) // 增加缓冲区大小
+    var channel = Channel<ByteArray>(10) // Increased buffer size
     
     fun producer(): suspend OutputStream.() -> Unit = {
         val outputStream = this
         try {
-            Log.i("HttpService", "启动MJPEG流生产者")
-            
-            // 处理图像帧
+            Log.i("HTTP_SERVICE_DEBUG", "Producer: Starting. Waiting for frames on channel: $channel. OutputStream: $outputStream")
             channel.consumeEach { frameData ->
+                Log.d("HTTP_SERVICE_DEBUG", "Producer: Received frame from channel. Size: ${frameData.size} bytes. Writing to OutputStream.")
                 try {
-                    Log.d("HttpService", "处理帧数据: ${frameData.size} 字节")
-                    
-                    // 发送帧边界
                     outputStream.write("--FRAME\r\n".toByteArray())
                     outputStream.write("Content-Type: image/jpeg\r\n".toByteArray())
                     outputStream.write("Content-Length: ${frameData.size}\r\n".toByteArray())
                     outputStream.write("\r\n".toByteArray())
-                    
-                    // 发送图像数据
                     outputStream.write(frameData)
                     outputStream.write("\r\n".toByteArray())
                     outputStream.flush()
-                    
-                    Log.d("HttpService", "帧已发送: ${frameData.size} 字节")
-                    
+                    Log.d("HTTP_SERVICE_DEBUG", "Producer: Frame sent to client. Size: ${frameData.size}")
                 } catch (e: Exception) {
-                    Log.e("HttpService", "发送帧时出错", e)
-                    return@consumeEach
+                    Log.e("HTTP_SERVICE_DEBUG", "Producer: Error writing frame to outputStream for client: $outputStream", e)
+                    return@consumeEach // Stop processing for this client if write fails
                 }
             }
-            
+        } catch (e: kotlinx.coroutines.channels.ClosedReceiveChannelException) {
+            Log.w("HTTP_SERVICE_DEBUG", "Producer: Channel was closed while waiting for or receiving data. Client: $outputStream", e)
         } catch (e: Exception) {
-            Log.e("HttpService", "生产者出错", e)
+            Log.e("HTTP_SERVICE_DEBUG", "Producer: Error in producer loop for client: $outputStream", e)
         } finally {
-            Log.i("HttpService", "生产者结束")
+            Log.i("HTTP_SERVICE_DEBUG", "Producer: Finished for client: $outputStream. Closing its OutputStream.")
+            try { outputStream.close() } catch (e: Exception) { 
+                Log.w("HTTP_SERVICE_DEBUG", "Producer: Error closing outputStream for client: $outputStream", e)
+            }
         }
     }
     
     public fun main() {
         try {
-            Log.i("HttpService", "Starting HTTP server on port 8080")
+            Log.i("HTTP_SERVICE_DEBUG", "main: Starting HTTP server on port 8080. Current channel: $channel")
             
             engine = embeddedServer(Netty, port = 8080, host = "0.0.0.0") {
                 routing {
                     get("/cam") {
-                        Log.i("HttpService", "Status request received")
+                        Log.i("HTTP_SERVICE_DEBUG", "/cam: Status request received from ${call.request.local.remoteHost}")
                         call.respondText("RemoteCam Server Running", ContentType.Text.Plain)
                     }
                     
                     get("/cam.mjpeg") {
-                        Log.i("HttpService", "收到MJPEG请求来自: ${call.request.local.remoteHost}")
+                        Log.i("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Client connected from ${call.request.local.remoteHost}. Using channel: $channel")
                         try {
                             call.respondOutputStream(
                                 ContentType.parse("multipart/x-mixed-replace; boundary=FRAME"),
                                 HttpStatusCode.OK
                             ) {
-                                Log.i("HttpService", "开始MJPEG流传输")
-                                producer().invoke(this)
+                                // 'this' is the OutputStream for the specific client connection
+                                Log.i("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Starting MJPEG stream transmission for client: $this. Using channel: $channel")
+                                producer().invoke(this) 
                             }
                         } catch (e: Exception) {
-                            Log.e("HttpService", "处理MJPEG请求时出错", e)
+                            Log.e("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Error processing request for ${call.request.local.remoteHost}", e)
                             try {
-                                call.respondText("Error: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
+                                if (call.response.status() == null) { // Avoid responding if already responded
+                                    call.respondText("Error: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
+                                }
                             } catch (e2: Exception) {
-                                Log.e("HttpService", "发送错误响应失败", e2)
+                                Log.e("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Failed to send error response to ${call.request.local.remoteHost}", e2)
                             }
                         }
                     }
                     
                     get("/") {
-                        Log.i("HttpService", "Root request received")
+                        Log.i("HTTP_SERVICE_DEBUG", "/: Root request received from ${call.request.local.remoteHost}")
                         call.respondText(
                             """
                             <html>
@@ -108,34 +107,32 @@ class HttpService {
             }
             
             engine.start(wait = false)
-            Log.i("HttpService", "HTTP server started successfully on 0.0.0.0:8080")
+            Log.i("HTTP_SERVICE_DEBUG", "main: HTTP server started successfully on 0.0.0.0:8080. Engine: $engine")
             
         } catch (e: Exception) {
-            Log.e("HttpService", "Error starting HTTP server", e)
-            throw e // 重新抛出异常，让调用者知道启动失败
+            Log.e("HTTP_SERVICE_DEBUG", "main: Error starting HTTP server", e)
+            throw e 
         }
     }
     
     fun stop() {
         try {
-            Log.i("HttpService", "Stopping HTTP server...")
+            Log.i("HTTP_SERVICE_DEBUG", "stop: Stopping HTTP server. Current channel: $channel, Engine initialized: ${::engine.isInitialized}")
             
-            // 先关闭channel，停止新数据流入
             if (!channel.isClosedForSend) {
-                channel.close()
-                Log.i("HttpService", "Channel closed")
+                channel.close() 
+                Log.i("HTTP_SERVICE_DEBUG", "stop: Channel closed. Cause: null (normal closure)")
             }
             
-            // 停止HTTP服务器
-            if (::engine.isInitialized) {
-                engine.stop(1000, 2000)
-                Log.i("HttpService", "HTTP server stopped successfully")
+            if (::engine.isInitialized) { // Corrected this line
+                engine.stop(1000, 2000) // Ktor's grace periods
+                Log.i("HTTP_SERVICE_DEBUG", "stop: HTTP server stopped successfully.")
             } else {
-                Log.w("HttpService", "Engine not initialized, nothing to stop")
+                Log.w("HTTP_SERVICE_DEBUG", "stop: Engine not initialized, nothing to stop.")
             }
             
         } catch (e: Exception) {
-            Log.e("HttpService", "Error stopping HTTP server", e)
+            Log.e("HTTP_SERVICE_DEBUG", "stop: Error stopping HTTP server", e)
         }
     }
 }

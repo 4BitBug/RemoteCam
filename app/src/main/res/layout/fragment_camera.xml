@@ -217,6 +217,27 @@
                     android:padding="4dp">
 
                     <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="center_vertical"
+                        android:text="FPS"
+                        android:textAppearance="@style/TextAppearance.AppCompat.Medium" />
+
+                    <Spinner
+                        android:id="@+id/spinner_fps"
+                        android:layout_width="131dp"
+                        android:layout_height="48dp" />
+
+                </TableRow>
+
+                <TableRow
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:layout_marginBottom="4dp"
+                    android:background="#393939"
+                    android:padding="4dp">
+
+                    <TextView
                         android:id="@+id/textView5"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"

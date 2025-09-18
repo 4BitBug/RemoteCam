@@ -51,8 +51,8 @@ class Cam : Service() {
             stopSelf()
             return // Do not proceed further if manually stopped
         }
-        // If not manually stopped, proceed to start foreground if needed.
-        startForegroundService()
+        // Defer startForegroundService until onStartCommand with "start" action
+        // to ensure manual stop logic is fully processed.
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -62,11 +62,14 @@ class Cam : Service() {
             Log.i("CAM", "Received 'start' command. Resetting manually_stopped state.")
             isStopping = false
             prefs.edit().putBoolean(KEY_SERVICE_MANUALLY_STOPPED, false).apply()
-            // Proceed with initialization and ensure foreground service is up
             if (!isForegroundServiceStarted) {
-                startForegroundService()
+                startForegroundService() // Start foreground service here
             }
-            initializeService()
+            if (isForegroundServiceStarted || !isStopping) { // Proceed if foreground started or not stopping
+                initializeService()
+            } else {
+                Log.w("CAM", "Skipping initializeService because foreground service did not start or service is stopping.")
+            }
             return START_STICKY
         }
 
@@ -76,41 +79,41 @@ class Cam : Service() {
             return START_NOT_STICKY
         }
 
-        // This check handles cases where service restarts after being killed by system
-        // or if onCreate decided it should stop based on prefs.
-        if (isStopping || prefs.getBoolean(KEY_SERVICE_MANUALLY_STOPPED, false)) {
+        // If service is already started and not stopping, process other intents
+        if (isForegroundServiceStarted && !isStopping) {
+            if (intent != null) {
+                try {
+                    when (intent.action) {
+                        "onPause" -> {
+                            engine?.insidePause = true
+                            if (engine?.isShowingPreview == true) engine?.restart()
+                        }
+                        "onResume" -> engine?.insidePause = false
+                        "start_camera_engine" -> startCameraEngine()
+                        "new_view_state" -> handleNewViewState(intent)
+                        "new_preview_surface" -> handleNewPreviewSurface(intent)
+                        "request_sensor_data" -> engine?.updateView()
+                        else -> Log.w("CAM", "Unhandled action: ${intent.action}")
+                    }
+                } catch (e: Exception) {
+                    Log.e("CAM", "Error processing command: ${intent.action}", e)
+                }
+            }
+            return START_STICKY
+        } else if (isStopping || prefs.getBoolean(KEY_SERVICE_MANUALLY_STOPPED, false)) {
             Log.w("CAM", "Service is stopping or was manually stopped. Ignoring: ${intent?.action}. Shutting down.")
             val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.cancel(NOTIFICATION_ID)
-            stopSelf() // Ensure this instance stops
+            stopSelf()
             return START_NOT_STICKY
         }
 
-        // For other intents, if not starting, stopping, or manually stopped.
+        // Fallback for unexpected scenarios, attempt to start foreground if not already
         if (!isForegroundServiceStarted) {
-            startForegroundService()
+             Log.w("CAM", "onStartCommand: Reached a state where service might need to start foreground (action: ${intent?.action}).")
+             // This path should ideally not be hit if "start" action is always first.
         }
-
-        if (intent != null) {
-            try {
-                when (intent.action) {
-                    // "start" and "stop" are handled above
-                    "onPause" -> {
-                        engine?.insidePause = true
-                        if (engine?.isShowingPreview == true) engine?.restart()
-                    }
-                    "onResume" -> engine?.insidePause = false
-                    "start_camera_engine" -> startCameraEngine()
-                    "new_view_state" -> handleNewViewState(intent)
-                    "new_preview_surface" -> handleNewPreviewSurface(intent)
-                    "request_sensor_data" -> engine?.updateView()
-                    else -> Log.w("CAM", "Unhandled action: ${intent.action}")
-                }
-            } catch (e: Exception) {
-                Log.e("CAM", "Error processing command: ${intent.action}", e)
-            }
-        }
-        return START_STICKY // Default for ongoing operations
+        return START_STICKY
     }
 
     private fun startForegroundService() {
@@ -120,7 +123,7 @@ class Cam : Service() {
         }
         
         try {
-            Log.i("CAM", "Attempting to start foreground service")
+            Log.i("CAM", "Attempting to start foreground service.")
             val channel = NotificationChannel(CHANNEL_ID, getString(R.string.service_name), NotificationManager.IMPORTANCE_LOW)
             channel.description = getString(R.string.service_description)
             getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
@@ -138,41 +141,55 @@ class Cam : Service() {
 
             val notification: Notification = builder.build()
             
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                try {
-                    val typeCamera = 1 // ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-                    val typeSpecialUse = 1073741824 // ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                    startForeground(NOTIFICATION_ID, notification, typeCamera or typeSpecialUse)
-                } catch (e: Exception) {
-                    Log.w("CAM", "Failed to set foreground service type, using default", e)
-                    startForeground(NOTIFICATION_ID, notification)
-                }
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
+            // For Android Q (API 29) and above, foreground service types are declared in manifest.
+            // Calling startForeground without explicit types will use those from the manifest.
+            // For Android U (API 34)+, calling startForeground(id, notification) is equivalent to
+            // startForeground(id, notification, 0), which means use types from manifest.
+            startForeground(NOTIFICATION_ID, notification)
             
             isForegroundServiceStarted = true
-            Log.i("CAM", "Foreground service started successfully with ID: $NOTIFICATION_ID")
+            Log.i("CAM", "Foreground service started successfully with ID: $NOTIFICATION_ID using manifest types.")
         } catch (e: Exception) {
             Log.e("CAM", "Failed to start foreground service", e)
+            isForegroundServiceStarted = false // Ensure this is false if it failed
         }
     }
 
     private fun initializeService() {
-        if (isStopping) return 
+        Log.i("CAM_DEBUG", "initializeService: Called. Current http: $http, engine: $engine")
+        if (isStopping) {
+            Log.w("CAM_DEBUG", "initializeService: Bailing out, service is stopping.")
+            return
+        }
         try {
             if (http == null) {
-                http = HttpService()
+                Log.i("CAM_DEBUG", "initializeService: Attempting to create HttpService instance.")
                 try {
-                    http?.main()
-                    Log.i("CAM", "HTTP service started on port 8080")
-                    engine?.http = http
+                    http = HttpService()
+                    Log.i("CAM_DEBUG", "initializeService: HttpService instance CREATED: $http")
                 } catch (e: Exception) {
-                    Log.e("CAM", "HTTP service failed to start", e)
+                    Log.e("CAM_DEBUG", "initializeService: FAILED to create HttpService instance", e)
+                    return // Can't proceed without http service
+                }
+
+                try {
+                    Log.i("CAM_DEBUG", "initializeService: Attempting to call http.main()")
+                    http?.main()
+                    Log.i("CAM_DEBUG", "initializeService: http.main() CALLED. Ktor server should be starting.")
+                    engine?.http = http 
+                    Log.i("CAM_DEBUG", "initializeService: Attempted to assign http to engine. Engine: $engine, Engine's http: ${engine?.http}")
+                } catch (e: Exception) {
+                    Log.e("CAM_DEBUG", "initializeService: HTTP service main() method FAILED", e)
+                }
+            } else {
+                Log.i("CAM_DEBUG", "initializeService: HttpService instance ALREADY EXISTS: $http")
+                 if (engine != null && engine?.http == null) {
+                    engine?.http = http
+                    Log.i("CAM_DEBUG", "initializeService: Assigned existing http to engine. Engine: $engine, Engine's http: ${engine?.http}")
                 }
             }
         } catch (e: Exception) {
-            Log.e("CAM", "Service initialization failed", e)
+            Log.e("CAM_DEBUG", "initializeService: Outer error during service initialization", e)
         }
     }
 
@@ -182,15 +199,28 @@ class Cam : Service() {
     }
 
     private fun startCameraEngine() {
-        if (isStopping) return 
+        Log.i("CAM_DEBUG", "startCameraEngine: Called. Current http: $http, engine: $engine. isStopping: $isStopping")
+        if (isStopping) {
+             Log.w("CAM_DEBUG", "startCameraEngine: Bailing out, service is stopping.")
+            return
+        }
+        if (http == null) {
+            Log.e("CAM_DEBUG", "startCameraEngine: Http service is null. Cannot start engine without it. Re-initializing service.")
+            initializeService() // Attempt to re-initialize if http is null
+            if (http == null) {
+                Log.e("CAM_DEBUG", "startCameraEngine: Http service still null after re-init attempt. Aborting.")
+                return
+            }
+        }
         try {
             engine?.destroy()
             engine = CamEngine(this)
+            Log.i("CAM_DEBUG", "startCameraEngine: CamEngine instance CREATED: $engine")
             engine?.http = http 
-            Log.i("CAM", "Camera engine started")
-            engine?.updateView()
+            Log.i("CAM_DEBUG", "startCameraEngine: Assigned http to new engine. Engine's http: ${engine?.http}")
+            engine?.updateView() 
         } catch (e: Exception) {
-            Log.e("CAM", "Failed to start camera engine", e)
+            Log.e("CAM_DEBUG", "startCameraEngine: Failed to start camera engine", e)
         }
     }
 
@@ -198,12 +228,19 @@ class Cam : Service() {
         if (isStopping) return
         try {
             val new: com.samsung.android.scan3d.fragments.CameraFragment.Companion.ViewState? = intent.extras?.getParcelable("data")
-            if (engine?.viewState != null && new != null && engine?.viewState != new) {
+            Log.i("CAM_DEBUG", "handleNewViewState: Received new view state: $new. Current engine: $engine")
+            if (engine != null && new != null && engine?.viewState != new) {
                 engine?.viewState = new
-                engine?.restart()
+                Log.i("CAM_DEBUG", "handleNewViewState: ViewState changed, restarting engine. New stream state: ${new.stream}, CameraId: ${new.cameraId}")
+                engine?.restart() 
+            } else if (engine == null) {
+                 Log.w("CAM_DEBUG", "handleNewViewState: Engine is null. Starting camera engine.")
+                 startCameraEngine() // If engine is null, try to start it with new viewstate
+                 engine?.viewState = new ?: return // if new is null, bail, otherwise set and restart
+                 engine?.restart()
             }
         } catch (e: Exception) {
-            Log.e("CAM", "Error handling new view state", e)
+            Log.e("CAM_DEBUG", "Error handling new view state", e)
         }
     }
 
@@ -211,64 +248,71 @@ class Cam : Service() {
         if (isStopping) return
         try {
             val surface: Surface? = intent.extras?.getParcelable("surface")
+            Log.i("CAM_DEBUG", "handleNewPreviewSurface: Received new surface: $surface. Current engine: $engine")
             engine?.previewSurface = surface
-            if (engine?.viewState?.preview == true) {
+            if (engine?.viewState?.preview == true && engine != null) {
                 engine?.let { eng ->
                     kotlinx.coroutines.GlobalScope.launch {
                         try {
-                            kotlinx.coroutines.delay(200) 
-                            if (!isStopping) eng.initializeCamera()
+                            kotlinx.coroutines.delay(200)
+                            if (!isStopping) {
+                                Log.i("CAM_DEBUG", "handleNewPreviewSurface: Re-initializing camera for new surface.")
+                                eng.initializeCamera()
+                            }
                         } catch (e: Exception) {
-                            Log.e("CAM", "Failed to reinitialize camera with new surface", e)
+                            Log.e("CAM_DEBUG", "Failed to reinitialize camera with new surface", e)
                         }
                     }
                 }
+            } else if (engine == null) {
+                Log.w("CAM_DEBUG", "handleNewPreviewSurface: Engine is null, cannot process surface.")
             }
         } catch (e: Exception) {
-            Log.e("CAM", "Error handling new preview surface", e)
+            Log.e("CAM_DEBUG", "Error handling new preview surface", e)
         }
     }
 
     fun kill() {
         if (isStopping && prefs.getBoolean(KEY_SERVICE_MANUALLY_STOPPED, false)) { 
-            Log.w("CAM", "Kill method already invoked and service is marked as manually stopped.")
+            Log.w("CAM_DEBUG", "Kill method: Already invoked and service is marked as manually stopped.")
             return
         }
-        Log.i("CAM", "Kill method invoked. Setting isStopping=true and marking as manually stopped in prefs.")
+        Log.i("CAM_DEBUG", "Kill method invoked. Setting isStopping=true and marking as manually stopped in prefs.")
         isStopping = true
         prefs.edit().putBoolean(KEY_SERVICE_MANUALLY_STOPPED, true).apply()
         
+        Log.i("CAM_DEBUG", "Kill: Destroying engine: $engine")
         engine?.destroy()
+        Log.i("CAM_DEBUG", "Kill: Stopping HTTP service: $http")
         http?.stop()
         
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         
-        Log.i("CAM", "Calling stopForeground(STOP_FOREGROUND_REMOVE)")
+        Log.i("CAM_DEBUG", "Kill: Calling stopForeground(STOP_FOREGROUND_REMOVE)")
         stopForeground(STOP_FOREGROUND_REMOVE)
-        Log.i("CAM", "Explicitly cancelling notification with ID: $NOTIFICATION_ID")
+        Log.i("CAM_DEBUG", "Kill: Explicitly cancelling notification with ID: $NOTIFICATION_ID")
         notificationManager.cancel(NOTIFICATION_ID)
         
         isForegroundServiceStarted = false 
         
-        Log.i("CAM", "Calling stopSelf()")
+        Log.i("CAM_DEBUG", "Kill: Calling stopSelf()")
         stopSelf() 
-        Log.i("CAM", "Service stopped and resources released")
+        Log.i("CAM_DEBUG", "Kill: Service stopped and resources released")
 
         val finishIntent = Intent(ACTION_FINISH_ACTIVITY_AND_REMOVE_TASK)
         sendBroadcast(finishIntent)
-        Log.i("CAM", "Sent broadcast to finish activity and remove task")
+        Log.i("CAM_DEBUG", "Kill: Sent broadcast to finish activity and remove task")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.i("CAM", "Service onDestroy called. isStopping: $isStopping, manually_stopped_pref: ${prefs.getBoolean(KEY_SERVICE_MANUALLY_STOPPED, false)}")
-        // If service is destroyed, and it was meant to be stopping, ensure notification is gone.
+        Log.i("CAM_DEBUG", "Service onDestroy called. isStopping: $isStopping, manually_stopped_pref: ${prefs.getBoolean(KEY_SERVICE_MANUALLY_STOPPED, false)}")
         if (isStopping || prefs.getBoolean(KEY_SERVICE_MANUALLY_STOPPED, false)) {
             val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.cancel(NOTIFICATION_ID)
-            Log.i("CAM", "onDestroy: Explicitly cancelled notification $NOTIFICATION_ID as service was stopping or manually stopped.")
+            Log.i("CAM_DEBUG", "onDestroy: Explicitly cancelled notification $NOTIFICATION_ID as service was stopping or manually stopped.")
         }
     }
 }

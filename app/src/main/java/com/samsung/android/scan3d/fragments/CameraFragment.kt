@@ -31,6 +31,7 @@ import android.view.ViewGroup
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.CompoundButton
+import android.widget.Spinner
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.navigation.NavController
@@ -58,7 +59,7 @@ class CameraFragment : Fragment() {
     var resW = 1280
     var resH = 720
 
-    var viewState = ViewState(true, stream = false, cameraId = "0", quality = 80, resolutionIndex = null)
+    var viewState = ViewState(true, stream = false, cameraId = "0", quality = 80, resolutionIndex = null, fpsRangeIndex = null)
 
     lateinit var Cac: CameraActivity
 
@@ -88,16 +89,16 @@ class CameraFragment : Fragment() {
 
     private val receiver: BroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            Log.i("CameraFragment", "收到广播: ${intent.action}")
-            Log.i("CameraFragment", "广播extras: ${intent.extras?.keySet()?.joinToString()}")
+            Log.i(TAG, "收到广播: ${intent.action}")
+            Log.i(TAG, "广播extras: ${intent.extras?.keySet()?.joinToString()}")
             
             when (intent.action) {
                 "UpdateFromCameraEngine" -> {
-                    Log.i("CameraFragment", "处理UpdateFromCameraEngine广播")
+                    Log.i(TAG, "处理UpdateFromCameraEngine广播")
                     handleCameraEngineUpdate(intent)
                 }
                 else -> {
-                    Log.w("CameraFragment", "未知广播动作: ${intent.action}")
+                    Log.w(TAG, "未知广播动作: ${intent.action}")
                 }
             }
         }
@@ -105,7 +106,7 @@ class CameraFragment : Fragment() {
 
     private fun handleCameraEngineUpdate(intent: Intent) {
         try {
-            Log.i("CameraFragment", "开始处理摄像头引擎更新")
+            Log.i(TAG, "开始处理摄像头引擎更新")
             
             // 处理快速数据更新
             val dataQuick = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -116,7 +117,7 @@ class CameraFragment : Fragment() {
             }
             
             if (dataQuick != null) {
-                Log.i("CameraFragment", "收到快速数据: ms=${dataQuick.ms}, rateKbs=${dataQuick.rateKbs}")
+                Log.i(TAG, "收到快速数据: ms=${dataQuick.ms}, rateKbs=${dataQuick.rateKbs}")
                 updateQuickData(dataQuick)
             }
 
@@ -129,17 +130,17 @@ class CameraFragment : Fragment() {
             }
             
             if (data != null) {
-                Log.i("CameraFragment", "收到摄像头数据: ${data.sensors.size}个传感器")
+                Log.i(TAG, "收到摄像头数据: ${data.sensors.size}个传感器, ${data.fpsRanges.size} FPS ranges, selected FPS index: ${data.fpsRangeSelected}")
                 data.sensors.forEach { sensor ->
-                    Log.i("CameraFragment", "传感器: ${sensor.cameraId} - ${sensor.title}")
+                    Log.i(TAG, "传感器: ${sensor.cameraId} - ${sensor.title}")
                 }
                 updateMainData(data)
             } else {
-                Log.w("CameraFragment", "数据为空")
+                Log.w(TAG, "数据为空")
             }
             
         } catch (e: Exception) {
-            Log.e("CameraFragment", "处理摄像头引擎更新时出错", e)
+            Log.e(TAG, "处理摄像头引擎更新时出错", e)
         }
     }
 
@@ -154,7 +155,7 @@ class CameraFragment : Fragment() {
                 fragmentCameraBinding.ftFeedback?.text = " ${dataQuick.ms}ms"
                 
             } catch (e: Exception) {
-                Log.e("CameraFragment", "更新快速数据时出错", e)
+                Log.e(TAG, "更新快速数据时出错", e)
             }
         }
     }
@@ -162,25 +163,27 @@ class CameraFragment : Fragment() {
     private fun updateMainData(data: CamEngine.Companion.Data) {
         // 更新分辨率
         try {
-            val re = data.resolutions[data.resolutionSelected]
-            resW = re.width
-            resH = re.height
-            Log.i("CameraFragment", "分辨率更新为: ${resW}x${resH}")
+            if (data.resolutions.isNotEmpty() && data.resolutionSelected >= 0 && data.resolutionSelected < data.resolutions.size) {
+                val re = data.resolutions[data.resolutionSelected]
+                resW = re.width
+                resH = re.height
+                Log.i(TAG, "分辨率更新为: ${resW}x${resH}")
+            } else {
+                 Log.w(TAG, "无效的分辨率数据或索引: selected=${data.resolutionSelected}, size=${data.resolutions.size}")
+            }
         } catch (e: Exception) {
-            Log.e("CameraFragment", "更新分辨率时出错", e)
+            Log.e(TAG, "更新分辨率时出错", e)
         }
 
         // 确保在主线程上更新UI
         if (Thread.currentThread() == android.os.Looper.getMainLooper().thread) {
-            // 已经在主线程
             updateUIWithData(data)
         } else {
-            // 切换到主线程
             activity?.runOnUiThread {
                 try {
                     updateUIWithData(data)
                 } catch (e: Exception) {
-                    Log.e("CameraFragment", "更新UI时出错", e)
+                    Log.e(TAG, "更新UI时出错", e)
                 }
             }
         }
@@ -192,7 +195,9 @@ class CameraFragment : Fragment() {
         }
 
         // 更新预览比例
-        fragmentCameraBinding.viewFinder.setAspectRatio(resW, resH)
+        if (resW > 0 && resH > 0) {
+            fragmentCameraBinding.viewFinder.setAspectRatio(resW, resH)
+        }
 
         // 设置开关
         setupSwitches()
@@ -205,35 +210,45 @@ class CameraFragment : Fragment() {
 
         // 设置分辨率选择器
         setupResolutionSpinner(data)
+
+        // 设置FPS选择器
+        setupFpsSpinner(data)
     }
 
     private fun setupSwitches() {
-        // 设置开关初始状态
+        fragmentCameraBinding.switch1?.setOnCheckedChangeListener(null) // Clear listener before setting checked state
+        fragmentCameraBinding.switch2?.setOnCheckedChangeListener(null)
+
         fragmentCameraBinding.switch1?.isChecked = viewState.preview
         fragmentCameraBinding.switch2?.isChecked = viewState.stream
         
-        Log.i("CameraFragment", "开关初始状态: preview=${viewState.preview}, stream=${viewState.stream}")
+        Log.i(TAG, "开关初始状态: preview=${viewState.preview}, stream=${viewState.stream}")
         
         fragmentCameraBinding.switch1?.setOnCheckedChangeListener { _, isChecked ->
-            Log.i("CameraFragment", "预览开关切换: $isChecked")
-            viewState.preview = isChecked
-            sendViewState()
+            if (viewState.preview != isChecked) {
+                Log.i(TAG, "预览开关切换: $isChecked")
+                viewState.preview = isChecked
+                sendViewState()
+            }
         }
         
         fragmentCameraBinding.switch2?.setOnCheckedChangeListener { _, isChecked ->
-            Log.i("CameraFragment", "流媒体开关切换: $isChecked")
-            viewState.stream = isChecked
-            sendViewState()
+            if (viewState.stream != isChecked) {
+                Log.i(TAG, "流媒体开关切换: $isChecked")
+                viewState.stream = isChecked
+                sendViewState()
+            }
         }
     }
 
     private fun setupCameraSpinner(data: CamEngine.Companion.Data) {
-        Log.i("CameraFragment", "设置摄像头Spinner: ${data.sensors.size}个传感器")
+        Log.i(TAG, "设置摄像头Spinner: ${data.sensors.size}个传感器")
         
         val spinner = fragmentCameraBinding.spinnerCam
+        spinner.onItemSelectedListener = null // Clear listener
+
         val spinnerDataList = data.sensors.map { it.title }
-        
-        Log.i("CameraFragment", "Spinner数据列表: ${spinnerDataList.joinToString()}")
+        Log.i(TAG, "摄像头Spinner数据列表: ${spinnerDataList.joinToString()}")
 
         val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, spinnerDataList)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
@@ -242,29 +257,31 @@ class CameraFragment : Fragment() {
         val selectedIndex = data.sensors.indexOf(data.sensorSelected)
         if (selectedIndex >= 0) {
             spinner.setSelection(selectedIndex)
-            Log.i("CameraFragment", "设置Spinner选中项: $selectedIndex")
+            Log.i(TAG, "设置摄像头Spinner选中项: $selectedIndex")
         }
 
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 if (position >= 0 && position < data.sensors.size) {
-                    if (viewState.cameraId != data.sensors[position].cameraId) {
-                        viewState.resolutionIndex = null
+                    val newCameraId = data.sensors[position].cameraId
+                    if (viewState.cameraId != newCameraId) {
+                        Log.i(TAG, "摄像头已选择: $newCameraId")
+                        viewState.cameraId = newCameraId
+                        viewState.resolutionIndex = null // Reset resolution on camera change
+                        viewState.fpsRangeIndex = null // Reset FPS on camera change
+                        sendViewState()
                     }
-                    viewState.cameraId = data.sensors[position].cameraId
-                    Log.i("CameraFragment", "摄像头已选择: ${data.sensors[position].cameraId}")
-                    sendViewState()
                 }
             }
-
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
-        
-        Log.i("CameraFragment", "摄像头Spinner设置完成")
+        Log.i(TAG, "摄像头Spinner设置完成")
     }
 
     private fun setupQualitySpinner() {
         val spinner = fragmentCameraBinding.spinnerQua
+        spinner.onItemSelectedListener = null // Clear listener
+
         val quals = arrayOf(1, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
         val spinnerDataList = quals.map { it.toString() }
         
@@ -272,51 +289,92 @@ class CameraFragment : Fragment() {
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         spinner.adapter = adapter
         
-        val qualityIndex = quals.indexOfFirst { it == viewState.quality }
-        if (qualityIndex >= 0) {
-            spinner.setSelection(qualityIndex)
-        }
+        val qualityIndex = quals.indexOfFirst { it == viewState.quality }.takeIf { it >=0 } ?: quals.indexOf(80)
+        spinner.setSelection(qualityIndex)
 
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                viewState.quality = quals[position]
-                sendViewState()
+                val newQuality = quals[position]
+                if (viewState.quality != newQuality) {
+                    Log.i(TAG, "质量已选择: $newQuality")
+                    viewState.quality = newQuality
+                    sendViewState()
+                }
             }
-
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
     }
 
     private fun setupResolutionSpinner(data: CamEngine.Companion.Data) {
         val spinner = fragmentCameraBinding.spinnerRes
+        spinner.onItemSelectedListener = null // Clear listener
         
+        if (data.resolutions.isEmpty()) {
+            Log.w(TAG, "No resolutions available for camera ${viewState.cameraId}")
+            spinner.adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, listOf("N/A"))
+            spinner.isEnabled = false
+            return
+        }
+        spinner.isEnabled = true
+
         val spinnerDataList = data.resolutions.map { it.toString() }
-        
         val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, spinnerDataList)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         spinner.adapter = adapter
 
-        if (viewState.resolutionIndex == null) {
-            viewState.resolutionIndex = 0
-        }
-        
-        val resolutionIndex = if (viewState.resolutionIndex!! < data.resolutions.size) {
-            viewState.resolutionIndex!!
-        } else {
-            0
-        }
-        
+        val resolutionIndex = data.resolutionSelected.takeIf { it >= 0 && it < data.resolutions.size } ?: 0
         spinner.setSelection(resolutionIndex)
+        Log.i(TAG, "设置分辨率Spinner选中项: $resolutionIndex (ViewState says: ${viewState.resolutionIndex})")
 
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                viewState.resolutionIndex = position
-                sendViewState()
+                if (viewState.resolutionIndex != position) {
+                     Log.i(TAG, "分辨率已选择: position $position, value ${data.resolutions.getOrNull(position)}")
+                    viewState.resolutionIndex = position
+                    sendViewState()
+                }
             }
-
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
     }
+
+    private fun setupFpsSpinner(data: CamEngine.Companion.Data) {
+        val spinner = fragmentCameraBinding.spinnerFps // Make sure this ID (spinner_fps) exists in your XML
+        spinner.onItemSelectedListener = null // Clear listener
+
+        if (data.fpsRanges.isEmpty()) {
+            Log.w(TAG, "No FPS ranges available for camera ${viewState.cameraId}")
+            spinner.adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, listOf("N/A"))
+            spinner.isEnabled = false
+            return
+        }
+        spinner.isEnabled = true
+
+        val spinnerDataList = data.fpsRanges.map { "${it.lower} FPS" } // Format for display
+        val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, spinnerDataList)
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        spinner.adapter = adapter
+
+        // data.fpsRangeSelected is already a safe index from CamEngine
+        val fpsIndex = data.fpsRangeSelected.takeIf { it >= 0 && it < data.fpsRanges.size } ?: 0
+        spinner.setSelection(fpsIndex)
+        Log.i(TAG, "设置FPS Spinner选中项: $fpsIndex (ViewState says: ${viewState.fpsRangeIndex})")
+
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                // Only trigger if the selection has actually changed from current viewState
+                val currentIndexInViewState = viewState.fpsRangeIndex ?: -1 // Treat null as different from any valid position
+                if (currentIndexInViewState != position) {
+                    Log.i(TAG, "FPS范围已选择: position $position, value ${data.fpsRanges.getOrNull(position)}")
+                    viewState.fpsRangeIndex = position
+                    sendViewState()
+                }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        Log.i(TAG, "FPS Spinner设置完成")
+    }
+
 
     fun sendViewState() {
         Cac.sendCam {
@@ -329,81 +387,50 @@ class CameraFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        // 注册广播接收器 - 使用应用级Context确保能接收到同包广播
         try {
             val intentFilter = IntentFilter("UpdateFromCameraEngine")
-            
-            // 获取应用上下文，确保广播接收的稳定性
             val appContext = requireActivity().applicationContext
             
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                // Android 14+ 需要明确指定接收器类型
-                appContext.registerReceiver(receiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                // Android 13
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 appContext.registerReceiver(receiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
             } else {
-                // Android 13以下
                 appContext.registerReceiver(receiver, intentFilter)
             }
             receiverRegistered = true
-            Log.i("CameraFragment", "广播接收器已注册到ApplicationContext")
-            
-            // 同时在Activity上也注册一个，双重保险
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    requireActivity().registerReceiver(receiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
-                } else {
-                    requireActivity().registerReceiver(receiver, intentFilter)
-                }
-                Log.i("CameraFragment", "广播接收器也注册到Activity")
-            } catch (e: Exception) {
-                Log.w("CameraFragment", "Activity注册失败，但ApplicationContext注册成功", e)
-            }
-            
+            Log.i(TAG, "广播接收器已注册")
         } catch (e: Exception) {
-            Log.e("CameraFragment", "注册广播接收器失败", e)
+            Log.e(TAG, "注册广播接收器失败", e)
         }
 
-        // 延迟启动摄像头引擎，确保Fragment完全初始化
         view.postDelayed({
             try {
-                Log.i("CameraFragment", "启动摄像头引擎")
-                Cac.sendCam {
-                    it.action = "start_camera_engine"
-                }
+                Log.i(TAG, "启动摄像头引擎")
+                Cac.sendCam { it.action = "start_camera_engine" }
             } catch (e: Exception) {
-                Log.e("CameraFragment", "启动摄像头引擎失败", e)
+                Log.e(TAG, "启动摄像头引擎失败", e)
             }
         }, 500)
 
-        // 再次延迟请求传感器数据
         view.postDelayed({
             try {
-                Log.i("CameraFragment", "请求传感器数据")
-                Cac.sendCam {
-                    it.action = "request_sensor_data"
-                }
+                Log.i(TAG, "请求传感器数据")
+                Cac.sendCam { it.action = "request_sensor_data" }
             } catch (e: Exception) {
-                Log.e("CameraFragment", "请求传感器数据失败", e)
+                Log.e(TAG, "请求传感器数据失败", e)
             }
         }, 1500)
 
-        // Kill按钮
         fragmentCameraBinding.buttonKill.setOnClickListener {
-            Log.i("CameraFragment", "Stop button clicked")
-            // Directly tell the service to stop
+            Log.i(TAG, "Stop button clicked")
             val serviceIntent = Intent(requireContext(), Cam::class.java)
             serviceIntent.action = "stop"
             requireActivity().startService(serviceIntent)
-            // Finish the activity and remove the task
             requireActivity().finishAndRemoveTask()
         }
 
-        // Surface回调
         fragmentCameraBinding.viewFinder.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceDestroyed(holder: SurfaceHolder) {
-                Log.i("CameraFragment", "Surface销毁")
+                Log.i(TAG, "Surface销毁")
                 Cac.sendCam {
                     it.action = "new_preview_surface"
                     it.putExtra("surface", null as Surface?)
@@ -411,9 +438,10 @@ class CameraFragment : Fragment() {
             }
 
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                Log.i("CameraFragment", "Surface改变: ${width}x${height}, 格式: $format")
-                // Surface大小改变时也需要更新
-                fragmentCameraBinding.viewFinder.setAspectRatio(resW, resH)
+                Log.i(TAG, "Surface改变: ${width}x${height}, 格式: $format")
+                if (resW > 0 && resH > 0) {
+                     fragmentCameraBinding.viewFinder.setAspectRatio(resW, resH)
+                }
                 Cac.sendCam {
                     it.action = "new_preview_surface"
                     it.putExtra("surface", holder.surface)
@@ -421,14 +449,12 @@ class CameraFragment : Fragment() {
             }
 
             override fun surfaceCreated(holder: SurfaceHolder) {
-                Log.i("CameraFragment", "Surface创建")
-                
-                // 确保Surface有效
+                Log.i(TAG, "Surface创建")
                 if (holder.surface != null && holder.surface.isValid) {
-                    Log.i("CameraFragment", "Surface有效，设置预览")
-                    fragmentCameraBinding.viewFinder.setAspectRatio(resW, resH)
-                    
-                    // 延迟一点发送Surface，确保Surface完全准备好
+                    Log.i(TAG, "Surface有效，设置预览")
+                     if (resW > 0 && resH > 0) {
+                        fragmentCameraBinding.viewFinder.setAspectRatio(resW, resH)
+                    }
                     fragmentCameraBinding.viewFinder.postDelayed({
                         Cac.sendCam {
                             it.action = "new_preview_surface"
@@ -436,7 +462,7 @@ class CameraFragment : Fragment() {
                         }
                     }, 100)
                 } else {
-                    Log.w("CameraFragment", "Surface无效")
+                    Log.w(TAG, "Surface无效")
                 }
             }
         })
@@ -446,25 +472,32 @@ class CameraFragment : Fragment() {
         super.onPause()
         if (receiverRegistered) {
             try {
-                // 从ApplicationContext注销
                 requireActivity().applicationContext.unregisterReceiver(receiver)
-                // 也尝试从Activity注销
-                try {
-                    requireActivity().unregisterReceiver(receiver)
-                } catch (e: Exception) {
-                    // 忽略Activity注销失败
-                }
                 receiverRegistered = false
-                Log.i("CameraFragment", "广播接收器已注销")
+                Log.i(TAG, "广播接收器已注销")
             } catch (e: Exception) {
-                Log.e("CameraFragment", "取消注册广播接收器失败", e)
+                Log.e(TAG, "取消注册广播接收器失败", e)
             }
         }
     }
 
     override fun onResume() {
         super.onResume()
-        // 广播接收器在onViewCreated中注册
+        if (!receiverRegistered) {
+             try {
+                val intentFilter = IntentFilter("UpdateFromCameraEngine")
+                val appContext = requireActivity().applicationContext
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    appContext.registerReceiver(receiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
+                } else {
+                    appContext.registerReceiver(receiver, intentFilter)
+                }
+                receiverRegistered = true
+                Log.i(TAG, "广播接收器已在onResume中重新注册")
+            } catch (e: Exception) {
+                Log.e(TAG, "在onResume中重新注册广播接收器失败", e)
+            }
+        }
     }
 
     override fun onStop() {
@@ -489,7 +522,8 @@ class CameraFragment : Fragment() {
             var stream: Boolean,
             var cameraId: String,
             var resolutionIndex: Int?,
-            var quality: Int
+            var quality: Int,
+            var fpsRangeIndex: Int? = null // Added this line
         ) : Parcelable
     }
 }
