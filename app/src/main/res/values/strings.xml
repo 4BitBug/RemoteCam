@@ -16,4 +16,9 @@
 <resources>
     <string name="app_name">RemoteCam</string>
     <string name="capture">Capture</string>
+    <string name="service_name">RemoteCam service</string>
+    <string name="service_description">RemoteCam camera streaming service</string>
+    <string name="notification_title">RemoteCam is running</string>
+    <string name="notification_text">Click to open, camera streaming service is active.</string>
+    <string name="notification_action_stop">Stop</string>
 </resources>

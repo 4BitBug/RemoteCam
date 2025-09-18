@@ -39,6 +39,7 @@ import com.example.android.camera.utils.OrientationLiveData
 import com.samsung.android.scan3d.CameraActivity
 import com.samsung.android.scan3d.R
 import com.samsung.android.scan3d.databinding.FragmentCameraBinding
+import com.samsung.android.scan3d.serv.Cam
 import com.samsung.android.scan3d.serv.CamEngine
 import com.samsung.android.scan3d.util.ClipboardUtil
 import com.samsung.android.scan3d.util.IpUtil
@@ -390,9 +391,13 @@ class CameraFragment : Fragment() {
 
         // Kill按钮
         fragmentCameraBinding.buttonKill.setOnClickListener {
-            Log.i("CameraFragment", "停止服务")
-            val intent = Intent("KILL")
-            requireActivity().sendBroadcast(intent)
+            Log.i("CameraFragment", "Stop button clicked")
+            // Directly tell the service to stop
+            val serviceIntent = Intent(requireContext(), Cam::class.java)
+            serviceIntent.action = "stop"
+            requireActivity().startService(serviceIntent)
+            // Finish the activity and remove the task
+            requireActivity().finishAndRemoveTask()
         }
 
         // Surface回调
