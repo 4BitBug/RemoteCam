@@ -421,11 +421,16 @@ class CameraFragment : Fragment() {
         }, 1500)
 
         fragmentCameraBinding.buttonKill.setOnClickListener {
-            Log.i(TAG, "Stop button clicked")
-            val serviceIntent = Intent(requireContext(), Cam::class.java)
-            serviceIntent.action = "stop"
-            requireActivity().startService(serviceIntent)
-            requireActivity().finishAndRemoveTask()
+            Log.i(TAG, "User Kill button clicked, sending 'user_kill' action to service.")
+            Cac.sendCam {
+                it.action = "user_kill"
+            }
+            // Directly finish the activity after telling the service to shut down.
+            // Give a brief moment for the service to process the command.
+            view.postDelayed({
+                Log.i(TAG, "Attempting to finish CameraActivity directly from fragment.")
+                activity?.finishAndRemoveTask()
+            }, 200) 
         }
 
         fragmentCameraBinding.viewFinder.holder.addCallback(object : SurfaceHolder.Callback {

@@ -37,7 +37,6 @@ import kotlinx.coroutines.channels.Channel
 class CameraActivity : AppCompatActivity() {
 
     private lateinit var activityCameraBinding: ActivityCameraBinding
-    // private var receiverRegistered = false // Will be replaced by specific receiver flags
     private var killReceiverRegistered = false
     private var finishActivityReceiverRegistered = false
 
@@ -47,9 +46,6 @@ class CameraActivity : AppCompatActivity() {
     private val killReceiver: BroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             Log.i("CameraActivity", "Received KILL broadcast - DEPRECATED, should be handled by service stop now.")
-            // finish() // This might be redundant if service handles full shutdown.
-            // For safety, we can leave it, or if Cam service reliably calls kill(),
-            // this receiver might become obsolete.
         }
     }
 
@@ -70,7 +66,7 @@ class CameraActivity : AppCompatActivity() {
             activityCameraBinding = ActivityCameraBinding.inflate(layoutInflater)
             setContentView(activityCameraBinding.root)
             
-            registerKillReceiver() // Keep for now, but review if it's still needed.
+            registerKillReceiver() 
             registerFinishActivityReceiver()
             
             if (checkPermissions()) {
@@ -89,17 +85,15 @@ class CameraActivity : AppCompatActivity() {
     }
 
     private fun registerKillReceiver() {
-        // This receiver handles the old "KILL" broadcast.
-        // Its utility should be reviewed as the service now handles its own stop via intent.
         try {
-            val intentFilter = IntentFilter("KILL")
+            val intentFilter = IntentFilter("KILL") // "KILL" action is for the old kill button, service should stop itself.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(killReceiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
             } else {
                 registerReceiver(killReceiver, intentFilter)
             }
             killReceiverRegistered = true
-            Log.i("CameraActivity", "Kill receiver registered (potentially deprecated)")
+            Log.i("CameraActivity", "Kill receiver registered (listens for 'KILL' action)")
         } catch (e: Exception) {
             Log.e("CameraActivity", "Error registering kill receiver", e)
         }
@@ -147,7 +141,7 @@ class CameraActivity : AppCompatActivity() {
 
     private fun startCameraService() {
         try {
-            Log.i("CameraActivity", "Starting camera service")
+            Log.i("CameraActivity", "Attempting to start Cam service with action 'start'")
             
             val intent = Intent(this, Cam::class.java)
             intent.action = "start"
@@ -158,21 +152,22 @@ class CameraActivity : AppCompatActivity() {
                 startService(intent)
             }
             
-            Log.i("CameraActivity", "Camera service start command sent")
+            Log.i("CameraActivity", "Cam service start command sent")
             
         } catch (e: Exception) {
-            Log.e("CameraActivity", "Failed to start camera service", e)
+            Log.e("CameraActivity", "Failed to start Cam service", e)
         }
     }
 
     override fun onPause() {
         super.onPause()
         try {
+            Log.d("CameraActivity", "onPause: Sending 'onPause' action to Cam service.")
             sendCam {
                 it.action = "onPause"
             }
         } catch (e: Exception) {
-            Log.e("CameraActivity", "Error in onPause", e)
+            Log.e("CameraActivity", "Error in onPause sending action to service", e)
         }
     }
 
@@ -180,26 +175,26 @@ class CameraActivity : AppCompatActivity() {
         try {
             val intent = Intent(this, Cam::class.java)
             extra(intent)
-            startService(intent) // Service should already be running, this just sends commands.
+            // Every call to startService with an Intent will be delivered to Cam.onStartCommand
+            startService(intent) 
         } catch (e: Exception) {
+            // Catch specific exceptions if possible, e.g., IllegalStateException if service cannot be started.
             Log.e("CameraActivity", "Error sending command to Cam service", e)
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // It's important that the Cam service's kill() method (which calls stopSelf)
-        // is the primary way the service stops. CameraActivity.onDestroy sending a "stop"
-        // command can be a fallback, but the service stopping itself is more robust.
-        // The service now also broadcasts to finish this activity, so direct call to stop service here
-        // might be redundant if the flow always goes through service.kill().
-        // try {
-        //     sendCam {
-        //         it.action = "stop"
-        //     }
-        // } catch (e: Exception) {
-        //     Log.e("CameraActivity", "Error in onDestroy sending stop to service", e)
-        // }
+        Log.i("CameraActivity", "onDestroy: Sending 'stop' action to Cam service.")
+        try {
+            // This is crucial to tell the service to stop its work and release resources
+            // when the activity is being destroyed through normal means.
+            val stopIntent = Intent(this, Cam::class.java)
+            stopIntent.action = "stop"
+            startService(stopIntent) // Send the stop command
+        } catch (e: Exception) {
+            Log.e("CameraActivity", "Error in onDestroy sending 'stop' action to Cam service", e)
+        }
         
         if (killReceiverRegistered) {
             try {
@@ -219,16 +214,18 @@ class CameraActivity : AppCompatActivity() {
                 Log.e("CameraActivity", "Error unregistering FinishActivityReceiver", e)
             }
         }
+        Log.i("CameraActivity", "onDestroy completed.")
     }
 
     override fun onResume() {
         super.onResume()
         try {
+            Log.d("CameraActivity", "onResume: Sending 'onResume' action to Cam service.")
             sendCam {
                 it.action = "onResume"
             }
         } catch (e: Exception) {
-            Log.e("CameraActivity", "Error in onResume", e)
+            Log.e("CameraActivity", "Error in onResume sending action to service", e)
         }
     }
 }
