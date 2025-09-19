@@ -25,28 +25,22 @@ import android.os.Bundle
 import android.os.Parcelable
 import android.util.Log
 import android.view.LayoutInflater
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.View
 import android.view.ViewGroup
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
-import android.widget.CompoundButton
 import android.widget.Spinner
 import android.widget.Toast
 import androidx.fragment.app.Fragment
-import androidx.navigation.NavController
-import androidx.navigation.Navigation
-import com.example.android.camera.utils.OrientationLiveData
 import com.samsung.android.scan3d.CameraActivity
-import com.samsung.android.scan3d.R
 import com.samsung.android.scan3d.databinding.FragmentCameraBinding
-import com.samsung.android.scan3d.serv.Cam
 import com.samsung.android.scan3d.serv.CamEngine
 import com.samsung.android.scan3d.util.ClipboardUtil
 import com.samsung.android.scan3d.util.IpUtil
 import kotlinx.parcelize.Parcelize
 import android.os.Build
-import android.view.Surface
 
 class CameraFragment : Fragment() {
 
@@ -56,15 +50,14 @@ class CameraFragment : Fragment() {
 
     private var receiverRegistered = false
 
-    var resW = 1280
-    var resH = 720
+    // These will store the EFFECTIVE width and height for the SurfaceView,
+    // considering the rotation CamEngine applies to the bitmap.
+    var resW = 1280 // Default effective width
+    var resH = 720  // Default effective height
 
-    var viewState = ViewState(true, stream = false, cameraId = "0", quality = 80, resolutionIndex = null, fpsRangeIndex = null)
+    var viewState = ViewState(true, stream = false, cameraId = "0", quality = 80, resolutionIndex = null, fpsRangeIndex = null, displayRotationDegrees = 0)
 
     lateinit var Cac: CameraActivity
-
-    /** Live data listener for changes in the device orientation relative to the camera */
-    private lateinit var relativeOrientation: OrientationLiveData
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -72,169 +65,134 @@ class CameraFragment : Fragment() {
         savedInstanceState: Bundle?
     ): View {
         _fragmentCameraBinding = FragmentCameraBinding.inflate(inflater, container, false)
+        Cac = (activity as CameraActivity?)!!
 
-        // Get the local ip address
         val localIp = IpUtil.getLocalIpAddress()
         _fragmentCameraBinding!!.textView6.text = "$localIp:8080/cam.mjpeg"
         _fragmentCameraBinding!!.textView6.setOnClickListener {
-            // Copy the ip address to the clipboard
-            ClipboardUtil.copyToClipboard(context, "ip", _fragmentCameraBinding!!.textView6.text.toString())
-            // Toast to notify the user
-            Toast.makeText(context, "已复制到剪贴板", Toast.LENGTH_SHORT).show()
+            context?.let { ctx ->
+                ClipboardUtil.copyToClipboard(ctx, "ip", _fragmentCameraBinding!!.textView6.text.toString())
+                Toast.makeText(ctx, "已复制到剪贴板", Toast.LENGTH_SHORT).show()
+            }
         }
-
-        Cac = (activity as CameraActivity?)!!
         return fragmentCameraBinding.root
     }
 
     private val receiver: BroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            Log.i(TAG, "收到广播: ${intent.action}")
-            Log.i(TAG, "广播extras: ${intent.extras?.keySet()?.joinToString()}")
-            
+            Log.d(TAG, "Broadcast received: ${intent.action}")
             when (intent.action) {
                 "UpdateFromCameraEngine" -> {
-                    Log.i(TAG, "处理UpdateFromCameraEngine广播")
                     handleCameraEngineUpdate(intent)
                 }
                 else -> {
-                    Log.w(TAG, "未知广播动作: ${intent.action}")
+                    Log.w(TAG, "Unknown broadcast action: ${intent.action}")
                 }
             }
         }
     }
 
     private fun handleCameraEngineUpdate(intent: Intent) {
-        try {
-            Log.i(TAG, "开始处理摄像头引擎更新")
-            
-            // 处理快速数据更新
-            val dataQuick = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent.extras?.getParcelable("dataQuick", CamEngine.Companion.DataQuick::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent.extras?.getParcelable("dataQuick")
-            }
-            
-            if (dataQuick != null) {
-                Log.i(TAG, "收到快速数据: ms=${dataQuick.ms}, rateKbs=${dataQuick.rateKbs}")
-                updateQuickData(dataQuick)
-            }
+        val dataQuick: CamEngine.Companion.DataQuick? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.extras?.getParcelable("dataQuick", CamEngine.Companion.DataQuick::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.extras?.getParcelable("dataQuick")
+        }
+        dataQuick?.let { updateQuickData(it) }
 
-            // 处理主要数据更新
-            val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent.extras?.getParcelable("data", CamEngine.Companion.Data::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent.extras?.getParcelable("data")
+        val data: CamEngine.Companion.Data? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.extras?.getParcelable("data", CamEngine.Companion.Data::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.extras?.getParcelable("data")
+        }
+        data?.let { updateMainData(it) }
+    }
+    
+    private fun updateDisplayRotationStateIfNeeded() {
+        val currentDisplayRotationDegrees = when (activity?.windowManager?.defaultDisplay?.rotation) {
+            Surface.ROTATION_0 -> 0
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> {
+                Log.w(TAG, "Unknown display rotation, defaulting to 0")
+                0
             }
-            
-            if (data != null) {
-                Log.i(TAG, "收到摄像头数据: ${data.sensors.size}个传感器, ${data.fpsRanges.size} FPS ranges, selected FPS index: ${data.fpsRangeSelected}")
-                data.sensors.forEach { sensor ->
-                    Log.i(TAG, "传感器: ${sensor.cameraId} - ${sensor.title}")
-                }
-                updateMainData(data)
-            } else {
-                Log.w(TAG, "数据为空")
-            }
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "处理摄像头引擎更新时出错", e)
+        }
+        if (viewState.displayRotationDegrees != currentDisplayRotationDegrees) {
+            Log.d(TAG, "Display rotation changed to: $currentDisplayRotationDegrees degrees")
+            viewState.displayRotationDegrees = currentDisplayRotationDegrees
+            sendViewState() // This will trigger CamEngine to potentially resend data if it considers displayRotation
+                           // And also CameraFragment will re-evaluate aspect ratio on next data update if needed.
         }
     }
 
     private fun updateQuickData(dataQuick: CamEngine.Companion.DataQuick) {
         activity?.runOnUiThread {
-            try {
-                if (!isAdded || activity == null || isDetached || _fragmentCameraBinding == null) {
-                    return@runOnUiThread
-                }
-                
-                fragmentCameraBinding.qualFeedback?.text = " ${dataQuick.rateKbs}kB/sec"
-                fragmentCameraBinding.ftFeedback?.text = " ${dataQuick.ms}ms"
-                
-            } catch (e: Exception) {
-                Log.e(TAG, "更新快速数据时出错", e)
-            }
+            if (!isAdded || _fragmentCameraBinding == null) return@runOnUiThread
+            fragmentCameraBinding.qualFeedback?.text = " ${dataQuick.rateKbs}kB/sec"
+            fragmentCameraBinding.ftFeedback?.text = " ${dataQuick.ms}ms"
         }
     }
 
     private fun updateMainData(data: CamEngine.Companion.Data) {
-        // 更新分辨率
-        try {
-            if (data.resolutions.isNotEmpty() && data.resolutionSelected >= 0 && data.resolutionSelected < data.resolutions.size) {
-                val re = data.resolutions[data.resolutionSelected]
-                resW = re.width
-                resH = re.height
-                Log.i(TAG, "分辨率更新为: ${resW}x${resH}")
+        if (data.resolutions.isNotEmpty() && data.resolutionSelected >= 0 && data.resolutionSelected < data.resolutions.size) {
+            val rawCamResolution = data.resolutions[data.resolutionSelected]
+            val rawCamWidth = rawCamResolution.width
+            val rawCamHeight = rawCamResolution.height
+            val sensorOrientation = data.sensorOrientation
+            val currentDisplayRotation = viewState.displayRotationDegrees // This is already updated by updateDisplayRotationStateIfNeeded
+
+            // Calculate the total rotation CamEngine applies to the bitmap to make it upright on the display.
+            val totalBitmapRotation = (sensorOrientation - currentDisplayRotation + 360) % 360
+
+            Log.d(TAG, "updateMainData: RawCam[${rawCamWidth}x${rawCamHeight}], SensorOrient: $sensorOrientation, DispRot: $currentDisplayRotation, TotalBitmapRot: $totalBitmapRotation")
+
+            if (totalBitmapRotation == 90 || totalBitmapRotation == 270) {
+                // If bitmap is rotated by 90/270, its width becomes height for the preview, and height becomes width.
+                resW = rawCamHeight // Effective width for SurfaceView
+                resH = rawCamWidth  // Effective height for SurfaceView
             } else {
-                 Log.w(TAG, "无效的分辨率数据或索引: selected=${data.resolutionSelected}, size=${data.resolutions.size}")
+                // If bitmap is rotated by 0/180 (or not at all), its dimensions map directly.
+                resW = rawCamWidth  // Effective width for SurfaceView
+                resH = rawCamHeight // Effective height for SurfaceView
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "更新分辨率时出错", e)
+            Log.d(TAG, "updateMainData: Effective SurfaceView Res [${resW}x${resH}]")
         }
 
-        // 确保在主线程上更新UI
-        if (Thread.currentThread() == android.os.Looper.getMainLooper().thread) {
-            updateUIWithData(data)
-        } else {
-            activity?.runOnUiThread {
-                try {
-                    updateUIWithData(data)
-                } catch (e: Exception) {
-                    Log.e(TAG, "更新UI时出错", e)
-                }
-            }
+        activity?.runOnUiThread {
+             if (!isAdded || _fragmentCameraBinding == null) return@runOnUiThread
+            updateUIWithData(data) // This will call setAspectRatio with the new resW, resH
         }
     }
 
     private fun updateUIWithData(data: CamEngine.Companion.Data) {
-        if (!isAdded || activity == null || isDetached || _fragmentCameraBinding == null) {
-            return
-        }
-
-        // 更新预览比例
+        // resW and resH are now effective dimensions for the SurfaceView
         if (resW > 0 && resH > 0) {
             fragmentCameraBinding.viewFinder.setAspectRatio(resW, resH)
         }
-
-        // 设置开关
-        setupSwitches()
-
-        // 设置摄像头选择器
+        setupSwitches(data)
         setupCameraSpinner(data)
-
-        // 设置质量选择器
-        setupQualitySpinner()
-
-        // 设置分辨率选择器
+        setupQualitySpinner(data)
         setupResolutionSpinner(data)
-
-        // 设置FPS选择器
         setupFpsSpinner(data)
     }
 
-    private fun setupSwitches() {
-        fragmentCameraBinding.switch1?.setOnCheckedChangeListener(null) // Clear listener before setting checked state
+    private fun setupSwitches(data: CamEngine.Companion.Data) {
+        fragmentCameraBinding.switch1?.setOnCheckedChangeListener(null)
         fragmentCameraBinding.switch2?.setOnCheckedChangeListener(null)
-
-        fragmentCameraBinding.switch1?.isChecked = viewState.preview
+        fragmentCameraBinding.switch1?.isChecked = viewState.preview 
         fragmentCameraBinding.switch2?.isChecked = viewState.stream
-        
-        Log.i(TAG, "开关初始状态: preview=${viewState.preview}, stream=${viewState.stream}")
-        
         fragmentCameraBinding.switch1?.setOnCheckedChangeListener { _, isChecked ->
             if (viewState.preview != isChecked) {
-                Log.i(TAG, "预览开关切换: $isChecked")
                 viewState.preview = isChecked
                 sendViewState()
             }
         }
-        
         fragmentCameraBinding.switch2?.setOnCheckedChangeListener { _, isChecked ->
             if (viewState.stream != isChecked) {
-                Log.i(TAG, "流媒体开关切换: $isChecked")
                 viewState.stream = isChecked
                 sendViewState()
             }
@@ -242,61 +200,46 @@ class CameraFragment : Fragment() {
     }
 
     private fun setupCameraSpinner(data: CamEngine.Companion.Data) {
-        Log.i(TAG, "设置摄像头Spinner: ${data.sensors.size}个传感器")
-        
         val spinner = fragmentCameraBinding.spinnerCam
-        spinner.onItemSelectedListener = null // Clear listener
-
+        spinner.onItemSelectedListener = null
         val spinnerDataList = data.sensors.map { it.title }
-        Log.i(TAG, "摄像头Spinner数据列表: ${spinnerDataList.joinToString()}")
-
         val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, spinnerDataList)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         spinner.adapter = adapter
-
-        val selectedIndex = data.sensors.indexOf(data.sensorSelected)
-        if (selectedIndex >= 0) {
-            spinner.setSelection(selectedIndex)
-            Log.i(TAG, "设置摄像头Spinner选中项: $selectedIndex")
-        }
+        val selectedIndex = data.sensors.indexOfFirst { it.cameraId == data.sensorSelected.cameraId }
+        if (selectedIndex >= 0) spinner.setSelection(selectedIndex)
+        else if (data.sensors.isNotEmpty()) spinner.setSelection(0)
 
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (position >= 0 && position < data.sensors.size) {
+                if (position < data.sensors.size) {
                     val newCameraId = data.sensors[position].cameraId
                     if (viewState.cameraId != newCameraId) {
-                        Log.i(TAG, "摄像头已选择: $newCameraId")
                         viewState.cameraId = newCameraId
-                        viewState.resolutionIndex = null // Reset resolution on camera change
-                        viewState.fpsRangeIndex = null // Reset FPS on camera change
+                        viewState.resolutionIndex = null 
+                        viewState.fpsRangeIndex = null
                         sendViewState()
                     }
                 }
             }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
-        Log.i(TAG, "摄像头Spinner设置完成")
     }
 
-    private fun setupQualitySpinner() {
+    private fun setupQualitySpinner(data: CamEngine.Companion.Data) {
         val spinner = fragmentCameraBinding.spinnerQua
-        spinner.onItemSelectedListener = null // Clear listener
-
+        spinner.onItemSelectedListener = null
         val quals = arrayOf(1, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100)
         val spinnerDataList = quals.map { it.toString() }
-        
         val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, spinnerDataList)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         spinner.adapter = adapter
-        
         val qualityIndex = quals.indexOfFirst { it == viewState.quality }.takeIf { it >=0 } ?: quals.indexOf(80)
         spinner.setSelection(qualityIndex)
-
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 val newQuality = quals[position]
                 if (viewState.quality != newQuality) {
-                    Log.i(TAG, "质量已选择: $newQuality")
                     viewState.quality = newQuality
                     sendViewState()
                 }
@@ -307,29 +250,22 @@ class CameraFragment : Fragment() {
 
     private fun setupResolutionSpinner(data: CamEngine.Companion.Data) {
         val spinner = fragmentCameraBinding.spinnerRes
-        spinner.onItemSelectedListener = null // Clear listener
-        
+        spinner.onItemSelectedListener = null
         if (data.resolutions.isEmpty()) {
-            Log.w(TAG, "No resolutions available for camera ${viewState.cameraId}")
             spinner.adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, listOf("N/A"))
             spinner.isEnabled = false
             return
         }
         spinner.isEnabled = true
-
         val spinnerDataList = data.resolutions.map { it.toString() }
         val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, spinnerDataList)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         spinner.adapter = adapter
-
-        val resolutionIndex = data.resolutionSelected.takeIf { it >= 0 && it < data.resolutions.size } ?: 0
+        val resolutionIndex = data.resolutionSelected.takeIf { it >= 0 && it < data.resolutions.size } ?: 0 
         spinner.setSelection(resolutionIndex)
-        Log.i(TAG, "设置分辨率Spinner选中项: $resolutionIndex (ViewState says: ${viewState.resolutionIndex})")
-
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (viewState.resolutionIndex != position) {
-                     Log.i(TAG, "分辨率已选择: position $position, value ${data.resolutions.getOrNull(position)}")
+                if (data.resolutionSelected != position) { 
                     viewState.resolutionIndex = position
                     sendViewState()
                 }
@@ -339,42 +275,30 @@ class CameraFragment : Fragment() {
     }
 
     private fun setupFpsSpinner(data: CamEngine.Companion.Data) {
-        val spinner = fragmentCameraBinding.spinnerFps // Make sure this ID (spinner_fps) exists in your XML
-        spinner.onItemSelectedListener = null // Clear listener
-
+        val spinner = fragmentCameraBinding.spinnerFps
+        spinner.onItemSelectedListener = null
         if (data.fpsRanges.isEmpty()) {
-            Log.w(TAG, "No FPS ranges available for camera ${viewState.cameraId}")
             spinner.adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, listOf("N/A"))
             spinner.isEnabled = false
             return
         }
         spinner.isEnabled = true
-
-        val spinnerDataList = data.fpsRanges.map { "${it.lower} FPS" } // Format for display
+        val spinnerDataList = data.fpsRanges.map { "${it.lower} FPS" }
         val adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_item, spinnerDataList)
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         spinner.adapter = adapter
-
-        // data.fpsRangeSelected is already a safe index from CamEngine
         val fpsIndex = data.fpsRangeSelected.takeIf { it >= 0 && it < data.fpsRanges.size } ?: 0
         spinner.setSelection(fpsIndex)
-        Log.i(TAG, "设置FPS Spinner选中项: $fpsIndex (ViewState says: ${viewState.fpsRangeIndex})")
-
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                // Only trigger if the selection has actually changed from current viewState
-                val currentIndexInViewState = viewState.fpsRangeIndex ?: -1 // Treat null as different from any valid position
-                if (currentIndexInViewState != position) {
-                    Log.i(TAG, "FPS范围已选择: position $position, value ${data.fpsRanges.getOrNull(position)}")
+                if (data.fpsRangeSelected != position) {
                     viewState.fpsRangeIndex = position
                     sendViewState()
                 }
             }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
-        Log.i(TAG, "FPS Spinner设置完成")
     }
-
 
     fun sendViewState() {
         Cac.sendCam {
@@ -386,56 +310,34 @@ class CameraFragment : Fragment() {
     @SuppressLint("MissingPermission")
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        Log.d(TAG, "onViewCreated")
 
-        try {
-            val intentFilter = IntentFilter("UpdateFromCameraEngine")
-            val appContext = requireActivity().applicationContext
-            
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                appContext.registerReceiver(receiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                appContext.registerReceiver(receiver, intentFilter)
-            }
-            receiverRegistered = true
-            Log.i(TAG, "广播接收器已注册")
-        } catch (e: Exception) {
-            Log.e(TAG, "注册广播接收器失败", e)
+        val intentFilter = IntentFilter("UpdateFromCameraEngine")
+        val appContext = requireActivity().applicationContext
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            appContext.registerReceiver(receiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            appContext.registerReceiver(receiver, intentFilter)
         }
+        receiverRegistered = true
 
-        view.postDelayed({
-            try {
-                Log.i(TAG, "启动摄像头引擎")
-                Cac.sendCam { it.action = "start_camera_engine" }
-            } catch (e: Exception) {
-                Log.e(TAG, "启动摄像头引擎失败", e)
-            }
-        }, 500)
+        updateDisplayRotationStateIfNeeded() 
 
-        view.postDelayed({
-            try {
-                Log.i(TAG, "请求传感器数据")
-                Cac.sendCam { it.action = "request_sensor_data" }
-            } catch (e: Exception) {
-                Log.e(TAG, "请求传感器数据失败", e)
-            }
-        }, 1500)
+        view.postDelayed({ Cac.sendCam { it.action = "start_camera_engine" } }, 100)
+        view.postDelayed({ Cac.sendCam { it.action = "request_sensor_data" } }, 500)
 
         fragmentCameraBinding.buttonKill.setOnClickListener {
             Log.i(TAG, "User Kill button clicked, sending 'user_kill' action to service.")
-            Cac.sendCam {
-                it.action = "user_kill"
-            }
-            // Directly finish the activity after telling the service to shut down.
-            // Give a brief moment for the service to process the command.
+            Cac.sendCam { it.action = "user_kill" }
             view.postDelayed({
                 Log.i(TAG, "Attempting to finish CameraActivity directly from fragment.")
                 activity?.finishAndRemoveTask()
-            }, 200) 
+            }, 200)
         }
 
         fragmentCameraBinding.viewFinder.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceDestroyed(holder: SurfaceHolder) {
-                Log.i(TAG, "Surface销毁")
+                Log.i(TAG, "Surface destroyed")
                 Cac.sendCam {
                     it.action = "new_preview_surface"
                     it.putExtra("surface", null as Surface?)
@@ -443,9 +345,13 @@ class CameraFragment : Fragment() {
             }
 
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                Log.i(TAG, "Surface改变: ${width}x${height}, 格式: $format")
-                if (resW > 0 && resH > 0) {
-                     fragmentCameraBinding.viewFinder.setAspectRatio(resW, resH)
+                Log.i(TAG, "Surface changed: ${width}x${height}")
+                // Update display rotation and then let updateMainData (triggered by request_sensor_data or viewState change)
+                // handle the aspect ratio adjustment based on the new display rotation.
+                updateDisplayRotationStateIfNeeded()
+                // It's also good to set it directly here if resW and resH are already correctly calculated for the new orientation
+                 if (resW > 0 && resH > 0) {
+                    fragmentCameraBinding.viewFinder.setAspectRatio(resW, resH)
                 }
                 Cac.sendCam {
                     it.action = "new_preview_surface"
@@ -454,10 +360,11 @@ class CameraFragment : Fragment() {
             }
 
             override fun surfaceCreated(holder: SurfaceHolder) {
-                Log.i(TAG, "Surface创建")
+                Log.i(TAG, "Surface created")
                 if (holder.surface != null && holder.surface.isValid) {
-                    Log.i(TAG, "Surface有效，设置预览")
-                     if (resW > 0 && resH > 0) {
+                    // Aspect ratio is set in updateMainData which is called after request_sensor_data
+                    // or after display rotation changes. We can set it here too if resW/resH are valid.
+                    if (resW > 0 && resH > 0) {
                         fragmentCameraBinding.viewFinder.setAspectRatio(resW, resH)
                     }
                     fragmentCameraBinding.viewFinder.postDelayed({
@@ -465,55 +372,46 @@ class CameraFragment : Fragment() {
                             it.action = "new_preview_surface"
                             it.putExtra("surface", holder.surface)
                         }
-                    }, 100)
+                    }, 100) 
                 } else {
-                    Log.w(TAG, "Surface无效")
+                    Log.w(TAG, "Surface invalid on creation")
                 }
             }
         })
     }
 
+    override fun onResume() {
+        super.onResume()
+        Log.d(TAG, "onResume")
+        if (!receiverRegistered) {
+            val intentFilter = IntentFilter("UpdateFromCameraEngine")
+            val appContext = requireActivity().applicationContext
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                appContext.registerReceiver(receiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                appContext.registerReceiver(receiver, intentFilter)
+            }
+            receiverRegistered = true
+        }
+        updateDisplayRotationStateIfNeeded()
+        Cac.sendCam { it.action = "request_sensor_data" } 
+    }
+
     override fun onPause() {
         super.onPause()
+        Log.d(TAG, "onPause")
         if (receiverRegistered) {
             try {
                 requireActivity().applicationContext.unregisterReceiver(receiver)
-                receiverRegistered = false
-                Log.i(TAG, "广播接收器已注销")
-            } catch (e: Exception) {
-                Log.e(TAG, "取消注册广播接收器失败", e)
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "Receiver not registered during onPause: ${e.message}")
             }
+            receiverRegistered = false
         }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        if (!receiverRegistered) {
-             try {
-                val intentFilter = IntentFilter("UpdateFromCameraEngine")
-                val appContext = requireActivity().applicationContext
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    appContext.registerReceiver(receiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
-                } else {
-                    appContext.registerReceiver(receiver, intentFilter)
-                }
-                receiverRegistered = true
-                Log.i(TAG, "广播接收器已在onResume中重新注册")
-            } catch (e: Exception) {
-                Log.e(TAG, "在onResume中重新注册广播接收器失败", e)
-            }
-        }
-    }
-
-    override fun onStop() {
-        super.onStop()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
     }
 
     override fun onDestroyView() {
+        Log.d(TAG, "onDestroyView")
         _fragmentCameraBinding = null
         super.onDestroyView()
     }
@@ -526,9 +424,10 @@ class CameraFragment : Fragment() {
             var preview: Boolean,
             var stream: Boolean,
             var cameraId: String,
-            var resolutionIndex: Int?,
+            var resolutionIndex: Int?, 
             var quality: Int,
-            var fpsRangeIndex: Int? = null // Added this line
+            var fpsRangeIndex: Int? = null, 
+            var displayRotationDegrees: Int = 0
         ) : Parcelable
     }
 }

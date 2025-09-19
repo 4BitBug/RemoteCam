@@ -23,8 +23,7 @@ import android.view.SurfaceView
 import kotlin.math.roundToInt
 
 /**
- * A [SurfaceView] that can be adjusted to a specified aspect ratio and
- * performs center-crop transformation of input frames.
+ * A [SurfaceView] that can be adjusted to a specified aspect ratio.
  */
 class AutoFitSurfaceView @JvmOverloads constructor(
         context: Context,
@@ -44,41 +43,37 @@ class AutoFitSurfaceView @JvmOverloads constructor(
     fun setAspectRatio(width: Int, height: Int) {
         require(width > 0 && height > 0) { "Size cannot be negative" }
         aspectRatio = width.toFloat() / height.toFloat()
-        holder.setFixedSize(width, height)
+        // Removed holder.setFixedSize(width, height)
         requestLayout()
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+        val viewWidth = MeasureSpec.getSize(widthMeasureSpec)
+        val viewHeight = MeasureSpec.getSize(heightMeasureSpec)
 
-
-        val width = MeasureSpec.getSize(widthMeasureSpec)
-        val height = MeasureSpec.getSize(heightMeasureSpec)
-        Log.i("AUTOFIT", "Measured dimensions set: $width x $height")
-        if (aspectRatio == 0f) {
-            setMeasuredDimension(width, height)
+        if (aspectRatio == 0f || viewWidth == 0 || viewHeight == 0) {
+            setMeasuredDimension(viewWidth, viewHeight)
         } else {
-
-
-            val currentRatio = width.toFloat()/height.toFloat()
-            val inv = 1.0/aspectRatio
+            // aspectRatio is contentWidth / contentHeight
             val newWidth: Int
             val newHeight: Int
-            if(currentRatio > inv){
-                //The screen is larger than the picture
-                //We need black bars on the side
-                 newWidth = (height*inv).toInt()
-                 newHeight= height
 
-            }else{
-                 newWidth = width
-                 newHeight= (width/inv).toInt()
+            val currentViewAspectRatio = viewWidth.toFloat() / viewHeight.toFloat()
+
+            if (currentViewAspectRatio > aspectRatio) {
+                // View is wider than the content, pillarbox effect.
+                // Fit to height.
+                newHeight = viewHeight
+                newWidth = (viewHeight * aspectRatio).roundToInt()
+            } else {
+                // View is taller than the content (or same aspect ratio), letterbox effect.
+                // Fit to width.
+                newWidth = viewWidth
+                newHeight = (viewWidth / aspectRatio).roundToInt()
             }
-
-            // Performs center-crop transformation of the camera frames
-
-
-            Log.i(TAG, "Measured dimensions set: $newWidth x $newHeight")
+            
+            Log.i(TAG, "Measured dimensions set: $newWidth x $newHeight (Content Aspect Ratio: $aspectRatio, View Available: ${viewWidth}x${viewHeight})")
             setMeasuredDimension(newWidth, newHeight)
         }
     }
