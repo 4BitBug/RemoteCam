@@ -145,7 +145,7 @@ class CameraFragment : Fragment() {
             val sensorOrientation = data.sensorOrientation
             val currentDisplayRotation = viewState.displayRotationDegrees // This is already updated by updateDisplayRotationStateIfNeeded
 
-            // Calculate the total rotation CamEngine applies to the bitmap to make it upright on the display.
+            // This calculation must mirror the rotation logic in CamEngine.kt to correctly predict the final bitmap dimensions.
             val totalBitmapRotation = (sensorOrientation - currentDisplayRotation + 360) % 360
 
             Log.d(TAG, "updateMainData: RawCam[${rawCamWidth}x${rawCamHeight}], SensorOrient: $sensorOrientation, DispRot: $currentDisplayRotation, TotalBitmapRot: $totalBitmapRotation")

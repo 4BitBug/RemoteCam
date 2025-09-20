@@ -349,10 +349,6 @@ class CamEngine(val context: Context) {
         val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
             addTarget(imageReader.surface)
             set(CaptureRequest.JPEG_QUALITY, viewState.quality.toByte())
-            if (chosenOutputFormat == ImageFormat.JPEG) {
-                 val sensorOrientation = characteristics?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-                 set(CaptureRequest.JPEG_ORIENTATION, sensorOrientation)
-            }
             set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, selectedSdkFpsRange)
             characteristics?.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.let { modes ->
                 if (modes.contains(CameraCharacteristics.CONTROL_AF_MODE_CONTINUOUS_PICTURE)) {
@@ -370,7 +366,7 @@ class CamEngine(val context: Context) {
                 if (streamFrameCounter % frameSkipRatio.toLong() == 0L) {
                     imageReader.acquireLatestImage()?.use { img ->
                         try {
-                            finalBytesForStream = when (img.format) {
+                            val initialBytes = when (img.format) {
                                 ImageFormat.JPEG -> {
                                     val buffer = img.planes[0].buffer
                                     val bytes = ByteArray(buffer.remaining())
@@ -392,30 +388,44 @@ class CamEngine(val context: Context) {
                                 else -> ByteArray(0).also { Log.w("CAM_ENGINE_DEBUG", "Unsupported image format: ${img.format}") }
                             }
 
-                            if (isShowingPreview && finalBytesForStream.isNotEmpty()) {
-                                val decodedBitmap = BitmapFactory.decodeByteArray(finalBytesForStream, 0, finalBytesForStream.size)
-                                if (decodedBitmap != null && decodedBitmap.width > 0 && decodedBitmap.height > 0) {
-                                    val sensorOrientation = characteristics?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-                                    val physicalDisplayRotation = viewState.displayRotationDegrees // From CameraFragment
-                                    
-                                    val rotationDegreesForPreview = (sensorOrientation - physicalDisplayRotation + 360) % 360
-                                    // Log.v("CAM_ENGINE_PREVIEW_ROT", "Sensor: $sensorOrientation, ViewState DisplayRot: $physicalDisplayRotation -> PreviewBitmapRot: $rotationDegreesForPreview")
+                            finalBytesForStream = initialBytes
 
-                                    if (rotationDegreesForPreview != 0) {
-                                        val matrix = Matrix()
-                                        matrix.postRotate(rotationDegreesForPreview.toFloat())
-                                        processedBitmapForPreview = Bitmap.createBitmap(
-                                            decodedBitmap, 0, 0, decodedBitmap.width, decodedBitmap.height, matrix, true
-                                        )
-                                        if (processedBitmapForPreview != decodedBitmap) {
-                                            decodedBitmap.recycle()
-                                        }
-                                    } else {
-                                        processedBitmapForPreview = decodedBitmap
+                            if (initialBytes.isEmpty()) {
+                                throw IllegalStateException("Could not get image bytes from camera")
+                            }
+
+                            val decodedBitmap = BitmapFactory.decodeByteArray(initialBytes, 0, initialBytes.size)
+                            if (decodedBitmap != null && decodedBitmap.width > 0 && decodedBitmap.height > 0) {
+                                val sensorOrientation = characteristics?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+                                val physicalDisplayRotation = viewState.displayRotationDegrees
+                                val rotationDegreesForPreview = (sensorOrientation - physicalDisplayRotation + 360) % 360
+
+                                val rotatedBitmap: Bitmap = if (rotationDegreesForPreview != 0) {
+                                    val matrix = Matrix()
+                                    matrix.postRotate(rotationDegreesForPreview.toFloat())
+                                    val bmp = Bitmap.createBitmap(
+                                        decodedBitmap, 0, 0, decodedBitmap.width, decodedBitmap.height, matrix, true
+                                    )
+                                    if (bmp != decodedBitmap) {
+                                        decodedBitmap.recycle()
                                     }
+                                    bmp
                                 } else {
-                                   Log.w("CAM_ENGINE_DEBUG", "BitmapFactory.decodeByteArray returned null or zero-dimension bitmap for preview.")
+                                    decodedBitmap
                                 }
+
+                                processedBitmapForPreview = rotatedBitmap
+
+                                if (viewState.stream) {
+                                    ByteArrayOutputStream().use { stream ->
+                                        rotatedBitmap.compress(Bitmap.CompressFormat.JPEG, viewState.quality, stream)
+                                        finalBytesForStream = stream.toByteArray()
+                                    }
+                                }
+                            } else {
+                                Log.w("CAM_ENGINE_DEBUG", "BitmapFactory.decodeByteArray returned null or zero-dimension bitmap.")
+                                finalBytesForStream = ByteArray(0)
+                                processedBitmapForPreview = null
                             }
                         } catch (e: Exception) {
                             Log.e("CAM_ENGINE_DEBUG", "Frame ${streamFrameCounter}: Img Processing Error", e)
@@ -472,8 +482,6 @@ class CamEngine(val context: Context) {
                         } else {
                             Log.w("CAM_ENGINE_DEBUG", "Frame ${streamFrameCounter}: Bitmap to draw has zero dimensions (should have been caught earlier).")
                         }
-                    } else {
-                        Log.d("CAM_ENGINE_DEBUG", "Frame ${streamFrameCounter}: Processed bitmap not drawn. isShowingPreview: $isShowingPreview, Surface: $currentSurface isValid: ${currentSurface?.isValid}")
                     }
                     if (!bmpToDraw.isRecycled) {
                         bmpToDraw.recycle()
