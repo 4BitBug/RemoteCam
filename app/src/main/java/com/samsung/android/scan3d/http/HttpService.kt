@@ -4,8 +4,11 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders // Changed to single import
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.*
+import io.ktor.server.plugins.defaultheaders.DefaultHeaders
+import io.ktor.server.request.receiveParameters
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.server.engine.*
@@ -83,6 +86,12 @@ class HttpService(private val context: Context) {
             Log.i("HTTP_SERVICE_DEBUG", "main: Starting HTTP server on port 59713. Current channel: $channel")
 
             engine = embeddedServer(Netty, port = 59713, host = "0.0.0.0") {
+                install(DefaultHeaders) {
+                    header("X-Content-Type-Options", "nosniff")      // Use string literal
+                    header("X-Frame-Options", "DENY")                 // Use string literal
+                    header("Referrer-Policy", "no-referrer")          // Use string literal
+                    header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; form-action 'self';") // Use string literal
+                }
                 routing {
                     get("/cam.mjpeg") {
                         val submittedPassword = call.request.queryParameters["password"]
@@ -93,31 +102,58 @@ class HttpService(private val context: Context) {
                                     ContentType.parse("multipart/x-mixed-replace; boundary=FRAME"),
                                     HttpStatusCode.OK
                                 ) {
-                                    // 'this' is the OutputStream for the specific client connection
                                     Log.i("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Starting MJPEG stream transmission for client: $this. Using channel: $channel")
                                     producer().invoke(this)
                                 }
                             } catch (e: Exception) {
                                 Log.e("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Error processing request for ${call.request.local.remoteHost}", e)
-                                try {
-                                    if (call.response.status() == null) { // Avoid responding if already responded
-                                        call.respondText("Error: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError)
-                                    }
-                                } catch (e2: Exception) {
-                                    Log.e("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Failed to send error response to ${call.request.local.remoteHost}", e2)
+                                if (call.response.status() == null) {
+                                    try { call.respondText("Error: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError) } catch (e2: Exception) { Log.e("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Failed to send error response", e2) }
                                 }
                             }
                         } else {
-                            Log.w("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Unauthorized access attempt from ${call.request.local.remoteHost}. Submitted password: '$submittedPassword'")
+                            Log.w("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Unauthorized access attempt from ${call.request.local.remoteHost}.")
                             call.respond(HttpStatusCode.Unauthorized, "Invalid or missing password.")
                         }
                     }
 
                     get("/") {
-                        val submittedPassword = call.request.queryParameters["password"]
-                        Log.i("HTTP_SERVICE_DEBUG", "/: Root request received from ${call.request.local.remoteHost}. Submitted password: '$submittedPassword'")
+                        val loginFailed = call.request.queryParameters["loginFailed"] == "true"
+                        Log.i("HTTP_SERVICE_DEBUG", "/: GET request for login page. Login failed: $loginFailed")
+                        var htmlResponse = """
+                            <html>
+                            <head><title>Login - RemoteCam</title>
+                            <style>
+                                body { font-family: sans-serif; display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f0f0; }
+                                form { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
+                                input[type="password"], input[type="submit"] { padding: 10px; margin-top: 5px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #ccc; }
+                                input[type="submit"] { background-color: #007bff; color: white; cursor: pointer; }
+                                .error { color: red; margin-top: 10px; }
+                            </style>
+                            </head>
+                            <body>
+                                <form method="POST" action="/">
+                                    Password: <input type="password" name="password" autofocus autocomplete="current-password">
+                                    <input type="submit" value="Login">
+                                </form>
+                        """
+                        if (loginFailed) {
+                            htmlResponse += """<p class="error">Incorrect password. Please try again.</p>"""
+                        }
+                        htmlResponse += """
+                            </body>
+                            </html>
+                         """
+                        call.respondText(htmlResponse.trimIndent(), ContentType.Text.Html, HttpStatusCode.OK)
+                    }
+
+                    post("/") {
+                        val parameters = call.receiveParameters()
+                        val submittedPassword = parameters["password"]
+                        Log.i("HTTP_SERVICE_DEBUG", "/: POST request received from ${call.request.local.remoteHost}.")
 
                         if (submittedPassword == currentPassword) {
+                            Log.i("HTTP_SERVICE_DEBUG", "/: Correct password submitted. Serving stream page.")
                             call.respondText(
                                 """
                                 <html>
@@ -136,31 +172,8 @@ class HttpService(private val context: Context) {
                                 ContentType.Text.Html
                             )
                         } else {
-                            var htmlResponse = """
-                                <html>
-                                <head><title>Login - RemoteCam</title>
-                                <style>
-                                    body { font-family: sans-serif; display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f0f0; }
-                                    form { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-                                    input[type="password"], input[type="submit"] { padding: 10px; margin-top: 5px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #ccc; }
-                                    input[type="submit"] { background-color: #007bff; color: white; cursor: pointer; }
-                                    .error { color: red; margin-top: 10px; }
-                                </style>
-                                </head>
-                                <body>
-                                    <form method="GET" action="/">
-                                        Password: <input type="password" name="password" autofocus autocomplete="current-password">
-                                        <input type="submit" value="Login">
-                                    </form>
-                            """
-                            if (submittedPassword != null && submittedPassword.isNotEmpty()) {
-                                htmlResponse += """<p class="error">Incorrect password. Please try again.</p>"""
-                            }
-                             htmlResponse += """
-                                </body>
-                                </html>
-                             """
-                            call.respondText(htmlResponse.trimIndent(), ContentType.Text.Html, HttpStatusCode.Unauthorized)
+                            Log.w("HTTP_SERVICE_DEBUG", "/: Incorrect password submitted. Redirecting to login page with error.")
+                            call.respondRedirect("/?loginFailed=true", permanent = false)
                         }
                     }
                 }
