@@ -8,7 +8,6 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.*
-// Remove DefaultHeaders import: import io.ktor.server.plugins.defaultheaders.DefaultHeaders
 import io.ktor.server.request.contentType
 import io.ktor.server.request.receiveParameters
 import io.ktor.server.response.*
@@ -19,6 +18,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.consumeEach
 import java.io.OutputStream
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.UUID
 
 class HttpService(private val context: Context) {
@@ -26,6 +26,7 @@ class HttpService(private val context: Context) {
     var channel = Channel<ByteArray>(10)
     private lateinit var prefs: SharedPreferences
     private var currentPasswordHash = "" // Will store salt:hash
+    private var mjpegAccessToken: String? = null // Token for MJPEG stream access
 
     companion object {
         const val PREFS_NAME = "RemoteCamHttpPrefs"
@@ -35,7 +36,7 @@ class HttpService(private val context: Context) {
         private const val DEFAULT_PASSWORD = "password"
     }
 
-    // --- Password Hashing (Placeholder - CRITICAL SECURITY WARNING) ---
+    // --- Password Hashing ---
     private fun generateSalt(): String {
         return UUID.randomUUID().toString()
     }
@@ -58,7 +59,14 @@ class HttpService(private val context: Context) {
         val newHash = hashPassword(plainPassword, salt)
         return newHash == storedHash
     }
-    // --- End Password Hashing Placeholder ---
+    // --- End Password Hashing ---
+
+    // --- MJPEG Access Token ---
+    private fun generateMjpegAccessToken(): String {
+        // Using UUID for simplicity. For higher security, consider a cryptographically secure random string.
+        return UUID.randomUUID().toString()
+    }
+    // --- End MJPEG Access Token ---
 
     init {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -76,7 +84,7 @@ class HttpService(private val context: Context) {
             prefs.edit {
                 putString(KEY_HTTP_PASSWORD_HASH, currentPasswordHash)
                 putBoolean(KEY_IS_HASHED, true)
-                remove(KEY_HTTP_PASSWORD_OLD) // Remove old plain text password
+                remove(KEY_HTTP_PASSWORD_OLD)
             }
             Log.i("HTTP_SERVICE_DEBUG", "HttpService initialized. Password (re)hashed and stored.")
         } else {
@@ -93,6 +101,7 @@ class HttpService(private val context: Context) {
         val salt = generateSalt()
         val newHash = hashPassword(newPasswordValue, salt)
         currentPasswordHash = "$salt:$newHash"
+        mjpegAccessToken = null // Invalidate any existing mjpeg token on password change
 
         prefs.edit {
             putString(KEY_HTTP_PASSWORD_HASH, currentPasswordHash)
@@ -133,14 +142,9 @@ class HttpService(private val context: Context) {
         try {
             Log.i("HTTP_SERVICE_DEBUG", "main: Starting HTTP server on port 59713.")
 
-            // Custom plugin to manage security headers and remove Server header
             val CustomSecurityHeaders = createApplicationPlugin(name = "CustomSecurityHeaders") {
                 onCallRespond {
-                    call -> // Ensure call is in scope
-                    // By not using DefaultHeaders, Ktor itself won't add a Server header.
-                    // If Netty adds one at a lower level, it's harder to remove without Netty-specific config.
-                    // This primarily prevents Ktor from adding its default Server header.
-
+                    call ->
                     call.response.headers.append("X-Content-Type-Options", "nosniff")
                     call.response.headers.append("X-Frame-Options", "DENY")
                     call.response.headers.append("Referrer-Policy", "no-referrer")
@@ -149,15 +153,14 @@ class HttpService(private val context: Context) {
             }
 
             engine = embeddedServer(Netty, port = 59713, host = "0.0.0.0") {
-                // Remove the DefaultHeaders plugin entirely
-                // install(DefaultHeaders) { ... }
-
-                install(CustomSecurityHeaders) // Install our custom plugin
+                install(CustomSecurityHeaders)
 
                 routing {
                     get("/cam.mjpeg") {
-                        val submittedPassword = call.request.queryParameters["password"]
-                        if (submittedPassword != null && verifyPassword(submittedPassword, currentPasswordHash)) {
+                        val submittedToken = call.request.queryParameters["token"]
+                        if (submittedToken != null && submittedToken == mjpegAccessToken && mjpegAccessToken != null) {
+                            // Optionally invalidate token after first use for higher security:
+                            // mjpegAccessToken = null 
                             try {
                                 call.respondOutputStream(
                                     ContentType.parse("multipart/x-mixed-replace; boundary=FRAME"),
@@ -172,7 +175,8 @@ class HttpService(private val context: Context) {
                                 }
                             }
                         } else {
-                            call.respond(HttpStatusCode.Unauthorized, "Invalid or missing password.")
+                            Log.w("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Unauthorized access attempt with token: $submittedToken. Expected: $mjpegAccessToken")
+                            call.respond(HttpStatusCode.Unauthorized, "Invalid or missing access token.")
                         }
                     }
 
@@ -188,7 +192,7 @@ class HttpService(private val context: Context) {
                                 </form>
                         """
                         if (loginFailed) {
-                            htmlResponse += """<p style=\"color:red;\">Incorrect password. Please try again.</p>""" // Minimal styling for error
+                            htmlResponse += """<p style=\"color:red;\">Incorrect password. Please try again.</p>"""
                         }
                         htmlResponse += """</body></html>"""
                         call.response.header(HttpHeaders.CacheControl, "no-store, no-cache, must-revalidate")
@@ -207,6 +211,10 @@ class HttpService(private val context: Context) {
                         val submittedPassword = parameters["password"]
 
                         if (submittedPassword != null && verifyPassword(submittedPassword, currentPasswordHash)) {
+                            // Password is correct, generate and store a new MJPEG access token
+                            mjpegAccessToken = generateMjpegAccessToken()
+                            Log.i("HTTP_SERVICE_DEBUG", "/: Correct password. Generated MJPEG access token: $mjpegAccessToken")
+
                             call.response.header(HttpHeaders.CacheControl, "no-store, no-cache, must-revalidate")
                             call.response.header(HttpHeaders.Pragma, "no-cache")
                             call.response.header(HttpHeaders.Expires, "0")
@@ -215,13 +223,15 @@ class HttpService(private val context: Context) {
                                 <html>
                                 <head><title>RemoteCam Stream</title></head>
                                 <body>
-                                    <img src="/cam.mjpeg?password=$submittedPassword" alt="Camera Stream">
+                                    <img src="/cam.mjpeg?token=$mjpegAccessToken" alt="Camera Stream">
                                 </body>
                                 </html>
                                 """.trimIndent(),
                                 ContentType.Text.Html
                             )
                         } else {
+                            Log.w("HTTP_SERVICE_DEBUG", "/: Incorrect password submitted.")
+                            mjpegAccessToken = null // Invalidate token on failed login attempt too
                             call.respondRedirect("/?loginFailed=true", permanent = false)
                         }
                     }
