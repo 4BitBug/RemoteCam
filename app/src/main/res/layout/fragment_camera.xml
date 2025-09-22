@@ -289,7 +289,7 @@
                             android:id="@+id/textView6"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:text="0.0.0.0:8080/cam.mjpeg" />
+                            android:text="0.0.0.0:59713" />
                     </LinearLayout>
 
                 </TableRow>

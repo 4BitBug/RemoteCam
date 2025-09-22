@@ -74,7 +74,7 @@ class CameraFragment : Fragment() {
 
 
         val localIp = IpUtil.getLocalIpAddress()
-        _fragmentCameraBinding!!.textView6.text = "$localIp:8080/cam.mjpeg"
+        _fragmentCameraBinding!!.textView6.text = "$localIp:59713"
         _fragmentCameraBinding!!.textView6.setOnClickListener {
             context?.let { ctx ->
                 ClipboardUtil.copyToClipboard(ctx, "ip", _fragmentCameraBinding!!.textView6.text.toString())

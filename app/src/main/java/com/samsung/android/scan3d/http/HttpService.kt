@@ -80,9 +80,9 @@ class HttpService(private val context: Context) {
 
     public fun main() {
         try {
-            Log.i("HTTP_SERVICE_DEBUG", "main: Starting HTTP server on port 8080. Current channel: $channel")
+            Log.i("HTTP_SERVICE_DEBUG", "main: Starting HTTP server on port 59713. Current channel: $channel")
 
-            engine = embeddedServer(Netty, port = 8080, host = "0.0.0.0") {
+            engine = embeddedServer(Netty, port = 59713, host = "0.0.0.0") {
                 routing {
                     get("/cam.mjpeg") {
                         val submittedPassword = call.request.queryParameters["password"]
@@ -167,7 +167,7 @@ class HttpService(private val context: Context) {
             }
 
             engine.start(wait = false)
-            Log.i("HTTP_SERVICE_DEBUG", "main: HTTP server started successfully on 0.0.0.0:8080. Engine: $engine")
+            Log.i("HTTP_SERVICE_DEBUG", "main: HTTP server started successfully on 0.0.0.0:59713. Engine: $engine")
 
         } catch (e: Exception) {
             Log.e("HTTP_SERVICE_DEBUG", "main: Error starting HTTP server", e)
