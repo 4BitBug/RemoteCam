@@ -37,7 +37,7 @@ import android.widget.Toast
 import androidx.fragment.app.Fragment
 import com.samsung.android.scan3d.CameraActivity
 import com.samsung.android.scan3d.databinding.FragmentCameraBinding
-import com.samsung.android.scan3d.http.HttpService
+import com.samsung.android.scan3d.http.HttpService // Keep this for PREFS_NAME
 import com.samsung.android.scan3d.serv.Cam
 import com.samsung.android.scan3d.serv.CamEngine
 import com.samsung.android.scan3d.util.ClipboardUtil
@@ -70,6 +70,7 @@ class CameraFragment : Fragment() {
     ): View {
         _fragmentCameraBinding = FragmentCameraBinding.inflate(inflater, container, false)
         Cac = (activity as CameraActivity?)!!
+        // Use HttpService.PREFS_NAME to get SharedPreferences
         httpPrefs = requireActivity().getSharedPreferences(HttpService.PREFS_NAME, Context.MODE_PRIVATE)
 
 
@@ -307,8 +308,9 @@ class CameraFragment : Fragment() {
     }
 
     private fun loadAndDisplayCurrentPassword() {
-        val currentPassword = httpPrefs.getString(HttpService.KEY_HTTP_PASSWORD, "password") // Default to "password"
-        fragmentCameraBinding.editTextNewPassword.setText(currentPassword)
+        // We no longer load and display the old password or hash.
+        // The EditText should be ready for the user to type a new password.
+        fragmentCameraBinding.editTextNewPassword.setText("") 
     }
 
     fun sendViewState() {
@@ -323,7 +325,7 @@ class CameraFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         Log.d(TAG, "onViewCreated")
 
-        loadAndDisplayCurrentPassword() // Load and display the current password
+        loadAndDisplayCurrentPassword() // This will now clear the password field
 
         val intentFilter = IntentFilter("UpdateFromCameraEngine")
         val appContext = requireActivity().applicationContext
@@ -356,7 +358,8 @@ class CameraFragment : Fragment() {
                     it.putExtra(Cam.EXTRA_NEW_PASSWORD, newPassword)
                 }
                 Toast.makeText(requireContext(), "Password change requested.", Toast.LENGTH_SHORT).show()
-                // Don't clear the password here, so it continues to show the current (newly set) password
+                // The password field will be cleared on next onResume or onViewCreated.
+                // If immediate clearing is desired, add: fragmentCameraBinding.editTextNewPassword.setText("")
             } else {
                 Toast.makeText(requireContext(), "Password cannot be empty.", Toast.LENGTH_SHORT).show()
             }
@@ -405,7 +408,7 @@ class CameraFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         Log.d(TAG, "onResume")
-        loadAndDisplayCurrentPassword() // Also load/refresh password on resume
+        loadAndDisplayCurrentPassword() // This will now clear the password field
         if (!receiverRegistered) {
             val intentFilter = IntentFilter("UpdateFromCameraEngine")
             val appContext = requireActivity().applicationContext

@@ -3,11 +3,13 @@ package com.samsung.android.scan3d.http
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import androidx.core.content.edit
 import io.ktor.http.ContentType
-import io.ktor.http.HttpHeaders // Changed to single import
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.*
-import io.ktor.server.plugins.defaultheaders.DefaultHeaders
+// Remove DefaultHeaders import: import io.ktor.server.plugins.defaultheaders.DefaultHeaders
+import io.ktor.server.request.contentType
 import io.ktor.server.request.receiveParameters
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -16,22 +18,71 @@ import io.ktor.server.netty.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.consumeEach
 import java.io.OutputStream
+import java.security.MessageDigest
+import java.util.UUID
 
 class HttpService(private val context: Context) {
     lateinit var engine: NettyApplicationEngine
-    var channel = Channel<ByteArray>(10) // Increased buffer size
+    var channel = Channel<ByteArray>(10)
     private lateinit var prefs: SharedPreferences
-    private var currentPassword = "password" // Default password
+    private var currentPasswordHash = "" // Will store salt:hash
 
     companion object {
         const val PREFS_NAME = "RemoteCamHttpPrefs"
-        const val KEY_HTTP_PASSWORD = "http_password"
+        const val KEY_HTTP_PASSWORD_OLD = "http_password" // Old key for plain text password
+        const val KEY_HTTP_PASSWORD_HASH = "http_password_hash" // New key for salt:hash
+        const val KEY_IS_HASHED = "is_password_hashed"
+        private const val DEFAULT_PASSWORD = "password"
     }
+
+    // --- Password Hashing (Placeholder - CRITICAL SECURITY WARNING) ---
+    private fun generateSalt(): String {
+        return UUID.randomUUID().toString()
+    }
+
+    private fun hashPassword(password: String, salt: String): String {
+        val saltedPassword = salt + password
+        val digest = MessageDigest.getInstance("SHA-256")
+        val hashBytes = digest.digest(saltedPassword.toByteArray(Charsets.UTF_8))
+        return hashBytes.joinToString("") { "%02x".format(it) } // Hex string
+    }
+
+    private fun verifyPassword(plainPassword: String, storedSaltAndHash: String): Boolean {
+        if (!storedSaltAndHash.contains(":")) {
+            Log.e("HTTP_SERVICE_DEBUG", "verifyPassword: Stored hash format is invalid.")
+            return false // Invalid format
+        }
+        val parts = storedSaltAndHash.split(":", limit = 2)
+        val salt = parts[0]
+        val storedHash = parts[1]
+        val newHash = hashPassword(plainPassword, salt)
+        return newHash == storedHash
+    }
+    // --- End Password Hashing Placeholder ---
 
     init {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        currentPassword = prefs.getString(KEY_HTTP_PASSWORD, "password") ?: "password"
-        Log.i("HTTP_SERVICE_DEBUG", "HttpService initialized. Loaded password: '$currentPassword'")
+        val storedSaltAndHash = prefs.getString(KEY_HTTP_PASSWORD_HASH, null)
+        val isHashed = prefs.getBoolean(KEY_IS_HASHED, false)
+
+        if (storedSaltAndHash == null || !isHashed) {
+            val oldPlainTextPassword = prefs.getString(KEY_HTTP_PASSWORD_OLD, null)
+            val passwordToHash = oldPlainTextPassword ?: DEFAULT_PASSWORD
+
+            val salt = generateSalt()
+            val newHash = hashPassword(passwordToHash, salt)
+            currentPasswordHash = "$salt:$newHash"
+
+            prefs.edit {
+                putString(KEY_HTTP_PASSWORD_HASH, currentPasswordHash)
+                putBoolean(KEY_IS_HASHED, true)
+                remove(KEY_HTTP_PASSWORD_OLD) // Remove old plain text password
+            }
+            Log.i("HTTP_SERVICE_DEBUG", "HttpService initialized. Password (re)hashed and stored.")
+        } else {
+            currentPasswordHash = storedSaltAndHash
+            Log.i("HTTP_SERVICE_DEBUG", "HttpService initialized. Loaded hashed password.")
+        }
     }
 
     fun changePassword(newPasswordValue: String): Boolean {
@@ -39,22 +90,23 @@ class HttpService(private val context: Context) {
             Log.w("HTTP_SERVICE_DEBUG", "changePassword: Attempted to set an empty or blank password.")
             return false
         }
-        prefs.edit().putString(KEY_HTTP_PASSWORD, newPasswordValue).apply()
-        currentPassword = newPasswordValue
-        Log.i("HTTP_SERVICE_DEBUG", "changePassword: Password changed successfully to '$newPasswordValue'")
-        return true
-    }
+        val salt = generateSalt()
+        val newHash = hashPassword(newPasswordValue, salt)
+        currentPasswordHash = "$salt:$newHash"
 
-    fun getCurrentPassword(): String {
-        return currentPassword
+        prefs.edit {
+            putString(KEY_HTTP_PASSWORD_HASH, currentPasswordHash)
+            putBoolean(KEY_IS_HASHED, true)
+            remove(KEY_HTTP_PASSWORD_OLD)
+        }
+        Log.i("HTTP_SERVICE_DEBUG", "changePassword: Password changed successfully. New hash stored.")
+        return true
     }
 
     fun producer(): suspend OutputStream.() -> Unit = {
         val outputStream = this
         try {
-            Log.i("HTTP_SERVICE_DEBUG", "Producer: Starting. Waiting for frames on channel: $channel. OutputStream: $outputStream")
             channel.consumeEach { frameData ->
-                Log.d("HTTP_SERVICE_DEBUG", "Producer: Received frame from channel. Size: ${frameData.size} bytes. Writing to OutputStream.")
                 try {
                     outputStream.write("--FRAME\r\n".toByteArray())
                     outputStream.write("Content-Type: image/jpeg\r\n".toByteArray())
@@ -63,74 +115,72 @@ class HttpService(private val context: Context) {
                     outputStream.write(frameData)
                     outputStream.write("\r\n".toByteArray())
                     outputStream.flush()
-                    Log.d("HTTP_SERVICE_DEBUG", "Producer: Frame sent to client. Size: ${frameData.size}")
                 } catch (e: Exception) {
-                    Log.e("HTTP_SERVICE_DEBUG", "Producer: Error writing frame to outputStream for client: $outputStream", e)
-                    return@consumeEach // Stop processing for this client if write fails
+                    Log.e("HTTP_SERVICE_DEBUG", "Producer: Error writing frame for client: $outputStream", e)
+                    return@consumeEach
                 }
             }
         } catch (e: kotlinx.coroutines.channels.ClosedReceiveChannelException) {
-            Log.w("HTTP_SERVICE_DEBUG", "Producer: Channel was closed while waiting for or receiving data. Client: $outputStream", e)
+            Log.w("HTTP_SERVICE_DEBUG", "Producer: Channel closed for client: $outputStream", e)
         } catch (e: Exception) {
             Log.e("HTTP_SERVICE_DEBUG", "Producer: Error in producer loop for client: $outputStream", e)
         } finally {
-            Log.i("HTTP_SERVICE_DEBUG", "Producer: Finished for client: $outputStream. Closing its OutputStream.")
-            try { outputStream.close() } catch (e: Exception) {
-                Log.w("HTTP_SERVICE_DEBUG", "Producer: Error closing outputStream for client: $outputStream", e)
-            }
+            try { outputStream.close() } catch (e: Exception) { /* ignore */ }
         }
     }
 
     public fun main() {
         try {
-            Log.i("HTTP_SERVICE_DEBUG", "main: Starting HTTP server on port 59713. Current channel: $channel")
+            Log.i("HTTP_SERVICE_DEBUG", "main: Starting HTTP server on port 59713.")
+
+            // Custom plugin to manage security headers and remove Server header
+            val CustomSecurityHeaders = createApplicationPlugin(name = "CustomSecurityHeaders") {
+                onCallRespond {
+                    call -> // Ensure call is in scope
+                    // By not using DefaultHeaders, Ktor itself won't add a Server header.
+                    // If Netty adds one at a lower level, it's harder to remove without Netty-specific config.
+                    // This primarily prevents Ktor from adding its default Server header.
+
+                    call.response.headers.append("X-Content-Type-Options", "nosniff")
+                    call.response.headers.append("X-Frame-Options", "DENY")
+                    call.response.headers.append("Referrer-Policy", "no-referrer")
+                    call.response.headers.append("Content-Security-Policy", "default-src 'self'; style-src 'self'; img-src 'self'; form-action 'self';")
+                }
+            }
 
             engine = embeddedServer(Netty, port = 59713, host = "0.0.0.0") {
-                install(DefaultHeaders) {
-                    header("X-Content-Type-Options", "nosniff")      // Use string literal
-                    header("X-Frame-Options", "DENY")                 // Use string literal
-                    header("Referrer-Policy", "no-referrer")          // Use string literal
-                    header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; form-action 'self';") // Use string literal
-                }
+                // Remove the DefaultHeaders plugin entirely
+                // install(DefaultHeaders) { ... }
+
+                install(CustomSecurityHeaders) // Install our custom plugin
+
                 routing {
                     get("/cam.mjpeg") {
                         val submittedPassword = call.request.queryParameters["password"]
-                        if (submittedPassword == currentPassword) {
-                            Log.i("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Client connected from ${call.request.local.remoteHost} with correct password. Using channel: $channel")
+                        if (submittedPassword != null && verifyPassword(submittedPassword, currentPasswordHash)) {
                             try {
                                 call.respondOutputStream(
                                     ContentType.parse("multipart/x-mixed-replace; boundary=FRAME"),
                                     HttpStatusCode.OK
                                 ) {
-                                    Log.i("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Starting MJPEG stream transmission for client: $this. Using channel: $channel")
                                     producer().invoke(this)
                                 }
                             } catch (e: Exception) {
-                                Log.e("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Error processing request for ${call.request.local.remoteHost}", e)
+                                Log.e("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Error processing request", e)
                                 if (call.response.status() == null) {
                                     try { call.respondText("Error: ${e.message}", ContentType.Text.Plain, HttpStatusCode.InternalServerError) } catch (e2: Exception) { Log.e("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Failed to send error response", e2) }
                                 }
                             }
                         } else {
-                            Log.w("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Unauthorized access attempt from ${call.request.local.remoteHost}.")
                             call.respond(HttpStatusCode.Unauthorized, "Invalid or missing password.")
                         }
                     }
 
                     get("/") {
                         val loginFailed = call.request.queryParameters["loginFailed"] == "true"
-                        Log.i("HTTP_SERVICE_DEBUG", "/: GET request for login page. Login failed: $loginFailed")
                         var htmlResponse = """
                             <html>
-                            <head><title>Login - RemoteCam</title>
-                            <style>
-                                body { font-family: sans-serif; display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f0f0f0; }
-                                form { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-                                input[type="password"], input[type="submit"] { padding: 10px; margin-top: 5px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #ccc; }
-                                input[type="submit"] { background-color: #007bff; color: white; cursor: pointer; }
-                                .error { color: red; margin-top: 10px; }
-                            </style>
-                            </head>
+                            <head><title>Login - RemoteCam</title></head>
                             <body>
                                 <form method="POST" action="/">
                                     Password: <input type="password" name="password" autofocus autocomplete="current-password">
@@ -138,41 +188,40 @@ class HttpService(private val context: Context) {
                                 </form>
                         """
                         if (loginFailed) {
-                            htmlResponse += """<p class="error">Incorrect password. Please try again.</p>"""
+                            htmlResponse += """<p style=\"color:red;\">Incorrect password. Please try again.</p>""" // Minimal styling for error
                         }
-                        htmlResponse += """
-                            </body>
-                            </html>
-                         """
+                        htmlResponse += """</body></html>"""
+                        call.response.header(HttpHeaders.CacheControl, "no-store, no-cache, must-revalidate")
+                        call.response.header(HttpHeaders.Pragma, "no-cache")
+                        call.response.header(HttpHeaders.Expires, "0")
                         call.respondText(htmlResponse.trimIndent(), ContentType.Text.Html, HttpStatusCode.OK)
                     }
 
                     post("/") {
+                        if (call.request.contentType() != ContentType.Application.FormUrlEncoded) {
+                            call.respond(HttpStatusCode.UnsupportedMediaType, "Content-Type must be application/x-www-form-urlencoded")
+                            return@post
+                        }
+
                         val parameters = call.receiveParameters()
                         val submittedPassword = parameters["password"]
-                        Log.i("HTTP_SERVICE_DEBUG", "/: POST request received from ${call.request.local.remoteHost}.")
 
-                        if (submittedPassword == currentPassword) {
-                            Log.i("HTTP_SERVICE_DEBUG", "/: Correct password submitted. Serving stream page.")
+                        if (submittedPassword != null && verifyPassword(submittedPassword, currentPasswordHash)) {
+                            call.response.header(HttpHeaders.CacheControl, "no-store, no-cache, must-revalidate")
+                            call.response.header(HttpHeaders.Pragma, "no-cache")
+                            call.response.header(HttpHeaders.Expires, "0")
                             call.respondText(
                                 """
                                 <html>
-                                <head>
-                                    <title>RemoteCam Stream</title>
-                                    <style>
-                                        body { margin:0; background-color:#000; display: flex; justify-content: center; align-items: center; height: 100vh; }
-                                        img { max-width: 100%; max-height: 100%; object-fit: contain; }
-                                    </style>
-                                </head>
+                                <head><title>RemoteCam Stream</title></head>
                                 <body>
-                                    <img src="/cam.mjpeg?password=$currentPassword" alt="Camera Stream">
+                                    <img src="/cam.mjpeg?password=$submittedPassword" alt="Camera Stream">
                                 </body>
                                 </html>
                                 """.trimIndent(),
                                 ContentType.Text.Html
                             )
                         } else {
-                            Log.w("HTTP_SERVICE_DEBUG", "/: Incorrect password submitted. Redirecting to login page with error.")
                             call.respondRedirect("/?loginFailed=true", permanent = false)
                         }
                     }
@@ -180,7 +229,7 @@ class HttpService(private val context: Context) {
             }
 
             engine.start(wait = false)
-            Log.i("HTTP_SERVICE_DEBUG", "main: HTTP server started successfully on 0.0.0.0:59713. Engine: $engine")
+            Log.i("HTTP_SERVICE_DEBUG", "main: HTTP server started successfully on 0.0.0.0:59713.")
 
         } catch (e: Exception) {
             Log.e("HTTP_SERVICE_DEBUG", "main: Error starting HTTP server", e)
@@ -190,20 +239,13 @@ class HttpService(private val context: Context) {
 
     fun stop() {
         try {
-            Log.i("HTTP_SERVICE_DEBUG", "stop: Stopping HTTP server. Current channel: $channel, Engine initialized: ${::engine.isInitialized}")
-
             if (!channel.isClosedForSend) {
                 channel.close()
-                Log.i("HTTP_SERVICE_DEBUG", "stop: Channel closed. Cause: null (normal closure)")
             }
-
             if (::engine.isInitialized) {
-                engine.stop(1000, 2000) // Ktor's grace periods
+                engine.stop(1000, 2000)
                 Log.i("HTTP_SERVICE_DEBUG", "stop: HTTP server stopped successfully.")
-            } else {
-                Log.w("HTTP_SERVICE_DEBUG", "stop: Engine not initialized, nothing to stop.")
             }
-
         } catch (e: Exception) {
             Log.e("HTTP_SERVICE_DEBUG", "stop: Error stopping HTTP server", e)
         }
