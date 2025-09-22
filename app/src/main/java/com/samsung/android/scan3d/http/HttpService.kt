@@ -148,7 +148,8 @@ class HttpService(private val context: Context) {
                     call.response.headers.append("X-Content-Type-Options", "nosniff")
                     call.response.headers.append("X-Frame-Options", "DENY")
                     call.response.headers.append("Referrer-Policy", "no-referrer")
-                    call.response.headers.append("Content-Security-Policy", "default-src 'self'; style-src 'self'; img-src 'self'; form-action 'self';")
+                    // Updated CSP to allow data: for img-src and media-src
+                    call.response.headers.append("Content-Security-Policy", "default-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' data:; form-action 'self';")
                 }
             }
 
@@ -159,8 +160,6 @@ class HttpService(private val context: Context) {
                     get("/cam.mjpeg") {
                         val submittedToken = call.request.queryParameters["token"]
                         if (submittedToken != null && submittedToken == mjpegAccessToken && mjpegAccessToken != null) {
-                            // Optionally invalidate token after first use for higher security:
-                            // mjpegAccessToken = null 
                             try {
                                 call.respondOutputStream(
                                     ContentType.parse("multipart/x-mixed-replace; boundary=FRAME"),
@@ -211,7 +210,6 @@ class HttpService(private val context: Context) {
                         val submittedPassword = parameters["password"]
 
                         if (submittedPassword != null && verifyPassword(submittedPassword, currentPasswordHash)) {
-                            // Password is correct, generate and store a new MJPEG access token
                             mjpegAccessToken = generateMjpegAccessToken()
                             Log.i("HTTP_SERVICE_DEBUG", "/: Correct password. Generated MJPEG access token: $mjpegAccessToken")
 
@@ -231,7 +229,7 @@ class HttpService(private val context: Context) {
                             )
                         } else {
                             Log.w("HTTP_SERVICE_DEBUG", "/: Incorrect password submitted.")
-                            mjpegAccessToken = null // Invalidate token on failed login attempt too
+                            mjpegAccessToken = null
                             call.respondRedirect("/?loginFailed=true", permanent = false)
                         }
                     }
