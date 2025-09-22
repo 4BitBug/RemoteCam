@@ -21,6 +21,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.os.Bundle
 import android.os.Parcelable
 import android.util.Log
@@ -36,6 +37,8 @@ import android.widget.Toast
 import androidx.fragment.app.Fragment
 import com.samsung.android.scan3d.CameraActivity
 import com.samsung.android.scan3d.databinding.FragmentCameraBinding
+import com.samsung.android.scan3d.http.HttpService
+import com.samsung.android.scan3d.serv.Cam
 import com.samsung.android.scan3d.serv.CamEngine
 import com.samsung.android.scan3d.util.ClipboardUtil
 import com.samsung.android.scan3d.util.IpUtil
@@ -58,6 +61,7 @@ class CameraFragment : Fragment() {
     var viewState = ViewState(true, stream = false, cameraId = "0", quality = 80, resolutionIndex = null, fpsRangeIndex = null, displayRotationDegrees = 0)
 
     lateinit var Cac: CameraActivity
+    private lateinit var httpPrefs: SharedPreferences
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -66,6 +70,8 @@ class CameraFragment : Fragment() {
     ): View {
         _fragmentCameraBinding = FragmentCameraBinding.inflate(inflater, container, false)
         Cac = (activity as CameraActivity?)!!
+        httpPrefs = requireActivity().getSharedPreferences(HttpService.PREFS_NAME, Context.MODE_PRIVATE)
+
 
         val localIp = IpUtil.getLocalIpAddress()
         _fragmentCameraBinding!!.textView6.text = "$localIp:8080/cam.mjpeg"
@@ -300,6 +306,11 @@ class CameraFragment : Fragment() {
         }
     }
 
+    private fun loadAndDisplayCurrentPassword() {
+        val currentPassword = httpPrefs.getString(HttpService.KEY_HTTP_PASSWORD, "password") // Default to "password"
+        fragmentCameraBinding.editTextNewPassword.setText(currentPassword)
+    }
+
     fun sendViewState() {
         Cac.sendCam {
             it.action = "new_view_state"
@@ -311,6 +322,8 @@ class CameraFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         Log.d(TAG, "onViewCreated")
+
+        loadAndDisplayCurrentPassword() // Load and display the current password
 
         val intentFilter = IntentFilter("UpdateFromCameraEngine")
         val appContext = requireActivity().applicationContext
@@ -335,6 +348,20 @@ class CameraFragment : Fragment() {
             }, 200)
         }
 
+        fragmentCameraBinding.buttonChangePassword.setOnClickListener {
+            val newPassword = fragmentCameraBinding.editTextNewPassword.text.toString()
+            if (newPassword.isNotBlank()) {
+                Cac.sendCam {
+                    it.action = Cam.ACTION_CHANGE_PASSWORD
+                    it.putExtra(Cam.EXTRA_NEW_PASSWORD, newPassword)
+                }
+                Toast.makeText(requireContext(), "Password change requested.", Toast.LENGTH_SHORT).show()
+                // Don't clear the password here, so it continues to show the current (newly set) password
+            } else {
+                Toast.makeText(requireContext(), "Password cannot be empty.", Toast.LENGTH_SHORT).show()
+            }
+        }
+
         fragmentCameraBinding.viewFinder.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceDestroyed(holder: SurfaceHolder) {
                 Log.i(TAG, "Surface destroyed")
@@ -346,10 +373,7 @@ class CameraFragment : Fragment() {
 
             override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
                 Log.i(TAG, "Surface changed: ${width}x${height}")
-                // Update display rotation and then let updateMainData (triggered by request_sensor_data or viewState change)
-                // handle the aspect ratio adjustment based on the new display rotation.
                 updateDisplayRotationStateIfNeeded()
-                // It's also good to set it directly here if resW and resH are already correctly calculated for the new orientation
                  if (resW > 0 && resH > 0) {
                     fragmentCameraBinding.viewFinder.setAspectRatio(resW, resH)
                 }
@@ -362,8 +386,6 @@ class CameraFragment : Fragment() {
             override fun surfaceCreated(holder: SurfaceHolder) {
                 Log.i(TAG, "Surface created")
                 if (holder.surface != null && holder.surface.isValid) {
-                    // Aspect ratio is set in updateMainData which is called after request_sensor_data
-                    // or after display rotation changes. We can set it here too if resW/resH are valid.
                     if (resW > 0 && resH > 0) {
                         fragmentCameraBinding.viewFinder.setAspectRatio(resW, resH)
                     }
@@ -383,6 +405,7 @@ class CameraFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         Log.d(TAG, "onResume")
+        loadAndDisplayCurrentPassword() // Also load/refresh password on resume
         if (!receiverRegistered) {
             val intentFilter = IntentFilter("UpdateFromCameraEngine")
             val appContext = requireActivity().applicationContext

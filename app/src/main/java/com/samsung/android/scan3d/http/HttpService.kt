@@ -1,5 +1,7 @@
 package com.samsung.android.scan3d.http
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -12,10 +14,37 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.consumeEach
 import java.io.OutputStream
 
-class HttpService {
+class HttpService(private val context: Context) {
     lateinit var engine: NettyApplicationEngine
     var channel = Channel<ByteArray>(10) // Increased buffer size
-    private val correctPassword = "password" // Server-side password
+    private lateinit var prefs: SharedPreferences
+    private var currentPassword = "password" // Default password
+
+    companion object {
+        const val PREFS_NAME = "RemoteCamHttpPrefs"
+        const val KEY_HTTP_PASSWORD = "http_password"
+    }
+
+    init {
+        prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        currentPassword = prefs.getString(KEY_HTTP_PASSWORD, "password") ?: "password"
+        Log.i("HTTP_SERVICE_DEBUG", "HttpService initialized. Loaded password: '$currentPassword'")
+    }
+
+    fun changePassword(newPasswordValue: String): Boolean {
+        if (newPasswordValue.isBlank()) {
+            Log.w("HTTP_SERVICE_DEBUG", "changePassword: Attempted to set an empty or blank password.")
+            return false
+        }
+        prefs.edit().putString(KEY_HTTP_PASSWORD, newPasswordValue).apply()
+        currentPassword = newPasswordValue
+        Log.i("HTTP_SERVICE_DEBUG", "changePassword: Password changed successfully to '$newPasswordValue'")
+        return true
+    }
+
+    fun getCurrentPassword(): String {
+        return currentPassword
+    }
 
     fun producer(): suspend OutputStream.() -> Unit = {
         val outputStream = this
@@ -57,7 +86,7 @@ class HttpService {
                 routing {
                     get("/cam.mjpeg") {
                         val submittedPassword = call.request.queryParameters["password"]
-                        if (submittedPassword == correctPassword) {
+                        if (submittedPassword == currentPassword) {
                             Log.i("HTTP_SERVICE_DEBUG", "/cam.mjpeg: Client connected from ${call.request.local.remoteHost} with correct password. Using channel: $channel")
                             try {
                                 call.respondOutputStream(
@@ -88,7 +117,7 @@ class HttpService {
                         val submittedPassword = call.request.queryParameters["password"]
                         Log.i("HTTP_SERVICE_DEBUG", "/: Root request received from ${call.request.local.remoteHost}. Submitted password: '$submittedPassword'")
 
-                        if (submittedPassword == correctPassword) {
+                        if (submittedPassword == currentPassword) {
                             call.respondText(
                                 """
                                 <html>
@@ -100,7 +129,7 @@ class HttpService {
                                     </style>
                                 </head>
                                 <body>
-                                    <img src="/cam.mjpeg?password=$correctPassword" alt="Camera Stream">
+                                    <img src="/cam.mjpeg?password=$currentPassword" alt="Camera Stream">
                                 </body>
                                 </html>
                                 """.trimIndent(),

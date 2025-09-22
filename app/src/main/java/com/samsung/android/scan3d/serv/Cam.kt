@@ -1,11 +1,9 @@
 package com.samsung.android.scan3d.serv
 
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.PendingIntent.FLAG_IMMUTABLE
-import android.app.PendingIntent.FLAG_UPDATE_CURRENT
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -22,7 +20,7 @@ import com.samsung.android.scan3d.http.HttpService
 
 class Cam : Service() {
     private var engine: CamEngine? = null
-    private var http: HttpService? = null
+    var http: HttpService? = null // Made public for password change access if needed, or use a specific method
     private val CHANNEL_ID = "REMOTE_CAM"
     private val NOTIFICATION_ID = 123
     private var isForegroundServiceActive = false
@@ -34,6 +32,8 @@ class Cam : Service() {
         private const val TAG = "CamService"
         const val PREFS_NAME = "RemoteCamServicePrefs"
         const val KEY_SERVICE_MANUALLY_STOPPED = "service_manually_stopped"
+        const val ACTION_CHANGE_PASSWORD = "com.samsung.android.scan3d.ACTION_CHANGE_PASSWORD"
+        const val EXTRA_NEW_PASSWORD = "com.samsung.android.scan3d.EXTRA_NEW_PASSWORD"
     }
 
     private lateinit var prefs: SharedPreferences
@@ -45,7 +45,7 @@ class Cam : Service() {
 
         // Initialize components here, but don't start intensive operations
         if (http == null) {
-            http = HttpService()
+            http = HttpService(applicationContext) // Pass applicationContext
             Log.i(TAG, "onCreate: HttpService instance CREATED: $http")
         }
         if (engine == null) {
@@ -77,7 +77,6 @@ class Cam : Service() {
                 // Initialize and start components if not already active
                 http?.main() // Idempotent or checks internally if already running
                 Log.i(TAG, "onStartCommand: 'start' - HTTP service main() called.")
-                // Camera engine operations are typically triggered by subsequent actions like new_preview_surface or new_view_state
             }
             "stop" -> {
                 Log.i(TAG, "onStartCommand: 'stop' action received (likely from Activity.onDestroy).")
@@ -89,18 +88,27 @@ class Cam : Service() {
                 handleServiceShutdown(manualStop = true, fromUserKill = true)
                 return START_NOT_STICKY
             }
+            ACTION_CHANGE_PASSWORD -> {
+                if (isServiceStopping || !isForegroundServiceActive) {
+                    Log.w(TAG, "onStartCommand: Service stopping or not in foreground. Ignoring action: '$action'")
+                    return START_NOT_STICKY
+                }
+                val newPassword = intent?.getStringExtra(EXTRA_NEW_PASSWORD) // Fixed nullability issue here
+                if (newPassword != null) {
+                    changeHttpPassword(newPassword)
+                } else {
+                    Log.w(TAG, "ACTION_CHANGE_PASSWORD received without new password or intent was null.")
+                }
+            }
             else -> {
                 if (isServiceStopping || !isForegroundServiceActive) {
                     Log.w(TAG, "onStartCommand: Service stopping or not in foreground. Ignoring action: '$action'")
-                    // If service is meant to be stopped, ensure it does not process further commands.
-                    // If it was manually stopped, it should already be handled above.
                     return START_NOT_STICKY
                 }
-                // Process other commands only if service is active and not stopping
                 processOtherCommands(intent)
             }
         }
-        return START_STICKY // For normal operations, if service is killed by system, try to restart.
+        return START_STICKY
     }
 
     private fun startForegroundServiceWithNotification() {
@@ -143,22 +151,19 @@ class Cam : Service() {
                 "onPause" -> {
                     Log.d(TAG, "processOtherCommands: 'onPause' action.")
                     engine?.insidePause = true
-                    if (engine?.isShowingPreview == true) engine?.restart() // Restart to apply changes if preview was on
+                    if (engine?.isShowingPreview == true) engine?.restart() 
                 }
                 "onResume" -> {
                     Log.d(TAG, "processOtherCommands: 'onResume' action.")
                     engine?.insidePause = false
-                    // If surface is already available and preview is desired, restart might be needed
                     if (engine?.previewSurface != null && engine?.viewState?.preview == true) {
                         engine?.restart()
                     }
                 }
                 "start_camera_engine" -> {
                      Log.d(TAG, "processOtherCommands: 'start_camera_engine' action. Ensuring engine is ready.")
-                    // This action might be redundant if view_state and surface handling are robust
-                    // For now, ensure http is linked and request an update or restart if necessary
                     if (engine?.http == null) engine?.http = http
-                    engine?.updateView() // Request an update which might trigger restart if conditions met
+                    engine?.updateView() 
                 }
                 "new_view_state" -> {
                     Log.d(TAG, "processOtherCommands: 'new_view_state' action.")
@@ -166,7 +171,7 @@ class Cam : Service() {
                     if (newState != null && engine?.viewState != newState) {
                         engine?.viewState = newState
                         Log.i(TAG, "ViewState updated, restarting CamEngine. Preview: ${newState.preview}, Stream: ${newState.stream}")
-                        engine?.restart() // Restart to apply new view state
+                        engine?.restart() 
                     } else if (newState == null) {
                         Log.w(TAG, "Received null ViewState in new_view_state action.")
                     }
@@ -177,12 +182,9 @@ class Cam : Service() {
                     engine?.previewSurface = surface
                     if (surface != null && engine?.viewState?.preview == true && engine?.insidePause == false) {
                         Log.i(TAG, "Valid surface received and preview is on, restarting CamEngine.")
-                        engine?.restart() // Restart to use the new surface
+                        engine?.restart() 
                     } else if (surface == null) {
                         Log.i(TAG, "Preview surface set to null. CamEngine will handle this internally.")
-                        // CamEngine should internally stop drawing or attempting to use a null surface.
-                        // If engine is not null and preview was active, CamEngine's restart (if called due to other state changes)
-                        // or its destroy method will handle stopping camera operations.
                     }
                 }
                 "request_sensor_data" -> {
@@ -216,7 +218,7 @@ class Cam : Service() {
         }
         try {
             http?.stop()
-            http = null
+            http = null // Nulled here
             Log.i(TAG, "shutdownServiceResources: HttpService stopped and nulled.")
         } catch (e: Exception) {
             Log.e(TAG, "shutdownServiceResources: Error stopping HttpService.", e)
@@ -224,7 +226,7 @@ class Cam : Service() {
     }
 
     private fun handleServiceShutdown(manualStop: Boolean, fromUserKill: Boolean) {
-        if (isServiceStopping && !fromUserKill) { // Allow user_kill to proceed even if already stopping
+        if (isServiceStopping && !fromUserKill) { 
             Log.w(TAG, "handleServiceShutdown: Already in the process of stopping. manualStop=$manualStop")
             return
         }
@@ -240,16 +242,15 @@ class Cam : Service() {
 
         if (isForegroundServiceActive) {
             Log.i(TAG, "handleServiceShutdown: Stopping foreground service.")
-            stopForeground(STOP_FOREGROUND_REMOVE) // Remove notification when stopping
+            stopForeground(STOP_FOREGROUND_REMOVE) 
             isForegroundServiceActive = false
         }
         
-        // Ensure notification is cancelled if somehow stopForeground didn't remove it
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.cancel(NOTIFICATION_ID)
 
         Log.i(TAG, "handleServiceShutdown: Calling stopSelf().")
-        stopSelf() // Stop the service itself
+        stopSelf()
 
         if (fromUserKill) {
             val finishIntent = Intent(ACTION_FINISH_ACTIVITY_AND_REMOVE_TASK)
@@ -257,16 +258,24 @@ class Cam : Service() {
             Log.i(TAG, "handleServiceShutdown: Sent broadcast to finish activity due to user kill.")
         }
     }
+    
+    private fun changeHttpPassword(newPassword: String) {
+        val success = http?.changePassword(newPassword) ?: false
+        if (success) {
+            Log.i(TAG, "HTTP password changed successfully.")
+            // Optionally, restart HttpService if needed, though Ktor might pick up changes if password check is dynamic
+            // For simplicity, current HttpService reloads password on init and changePassword updates it in SharedPreferences
+        } else {
+            Log.w(TAG, "Failed to change HTTP password.")
+        }
+    }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent?): IBinder? = null // Not using binding for password change, using Intent action
 
     override fun onDestroy() {
         Log.i(TAG, "onDestroy: Service is being destroyed.")
-        // Ensure resources are released as a final measure.
-        // isServiceStopping should ideally be true here if shutdown was initiated properly.
         shutdownServiceResources()
         if (isForegroundServiceActive) {
-             // This case should ideally not happen if stopForeground(true) was called
             Log.w(TAG, "onDestroy: Service destroyed but was still marked as foreground. Attempting to clear notification.")
             val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.cancel(NOTIFICATION_ID)
